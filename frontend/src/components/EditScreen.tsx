@@ -130,7 +130,7 @@ export default function EditScreen({
   };
 
   // Sort shots by sequence
-  const sortedShots = [...shots].sort((a, b) => a.sequence - b.sequence);
+  const sortedShots = [...(shots || [])].sort((a, b) => a.sequence - b.sequence);
 
   // Calculate total combinations
   const totalCombinations = sortedShots.reduce((acc, shot) => {

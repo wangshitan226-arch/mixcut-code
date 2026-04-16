@@ -236,20 +236,27 @@ export default function App() {
       {/* Dynamic Content based on Main Tab */}
       <div className="flex-1 overflow-hidden flex flex-col">
         {mainTab === 'home' && <HomeScreen onNavigate={() => setMainTab('edit')} />}
-        {mainTab === 'edit' && projectId && (
-          <EditScreen 
-            projectId={projectId}
-            shots={shots}
-            onBack={() => setMainTab('home')} 
-            onSynthesize={handleSynthesize}
-            onAddShot={handleAddShot}
-            onDeleteShot={handleDeleteShot}
-            onDeleteMaterial={handleDeleteMaterial}
-            onRefresh={refreshShots}
-            isLoading={isLoading}
-            selectedQuality={selectedQuality}
-            onQualityChange={setSelectedQuality}
-          />
+        {mainTab === 'edit' && (
+          projectId ? (
+            <EditScreen 
+              projectId={projectId}
+              shots={shots}
+              onBack={() => setMainTab('home')} 
+              onSynthesize={handleSynthesize}
+              onAddShot={handleAddShot}
+              onDeleteShot={handleDeleteShot}
+              onDeleteMaterial={handleDeleteMaterial}
+              onRefresh={refreshShots}
+              isLoading={isLoading}
+              selectedQuality={selectedQuality}
+              onQualityChange={setSelectedQuality}
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-full text-gray-400">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-4"></div>
+              <p className="text-sm">加载中...</p>
+            </div>
+          )
         )}
         {mainTab === 'results' && (
           <ResultsScreen 

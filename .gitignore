@@ -1,7 +1,6 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
 .Python
 env/
@@ -29,6 +28,14 @@ instance/
 *.sqlite
 *.sqlite3
 
+# Large media files - 忽略大文件目录
+backend/uploads/*
+backend/renders/*
+backend/unified/*
+!backend/uploads/.gitkeep
+!backend/renders/.gitkeep
+!backend/unified/.gitkeep
+
 # Node.js
 node_modules/
 npm-debug.log*
@@ -49,9 +56,3 @@ build/
 # OS
 .DS_Store
 Thumbs.db
-
-# Large media files (optional - uncomment if you don't want to commit videos)
-# backend/uploads/
-# backend/renders/
-# backend/unified/
-# backend/uploads/thumbnails/

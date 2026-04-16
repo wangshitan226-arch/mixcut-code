@@ -225,34 +225,61 @@ def fast_concat_videos(unified_files, output_path):
             ]
         else:
             # Some files lack audio, need to handle it
-            # Use filter_complex to ensure consistent audio
-            inputs = []
-            filter_parts = []
+            # Use anear=0 to add silent audio to files without audio, then concat with -c copy
             
-            for i, (filepath, has_audio) in enumerate(files_with_audio):
-                inputs.extend(['-i', filepath])
-                if has_audio:
-                    filter_parts.append(f'[{i}:v:0][{i}:a:0]')
-                else:
-                    # Add silent audio for files without audio
-                    filter_parts.append(f'[{i}:v:0][{i}:a:0]')
+            # First, process files to ensure all have audio
+            processed_files = []
+            temp_files = []
             
-            # Build concat filter
-            concat_input = ''.join([f'[{i}:v:0][{i}:a:0]' for i in range(len(files_with_audio))])
-            filter_complex = f"{concat_input}concat=n={len(files_with_audio)}:v=1:a=1[outv][outa]"
-            
-            cmd = [
-                'ffmpeg', '-y',
-                *inputs,
-                '-filter_complex', filter_complex,
-                '-map', '[outv]',
-                '-map', '[outa]',
-                '-c:v', 'copy',  # Copy video without re-encoding
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-movflags', '+faststart',
-                output_path
-            ]
+            try:
+                for i, (filepath, has_audio) in enumerate(files_with_audio):
+                    if has_audio:
+                        processed_files.append(filepath)
+                    else:
+                        # Add silent audio to files without audio
+                        temp_output = os.path.join(RENDERS_FOLDER, f"temp_{uuid.uuid4().hex[:8]}_{i}.mp4")
+                        temp_files.append(temp_output)
+                        
+                        cmd = [
+                            'ffmpeg', '-y',
+                            '-i', filepath,
+                            '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+                            '-c:v', 'copy',
+                            '-c:a', 'aac',
+                            '-b:a', '128k',
+                            '-ar', '44100',
+                            '-ac', '2',
+                            '-shortest',
+                            '-movflags', '+faststart',
+                            temp_output
+                        ]
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        if result.returncode == 0:
+                            processed_files.append(temp_output)
+                        else:
+                            processed_files.append(filepath)  # Fallback to original
+                
+                # Create new concat list with processed files
+                with open(list_file, 'w') as f:
+                    for filepath in processed_files:
+                        abs_path = os.path.abspath(filepath)
+                        f.write(f"file '{abs_path}'\n")
+                
+                # Now all files have audio, can use -c copy
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-f', 'concat',
+                    '-safe', '0',
+                    '-i', list_file,
+                    '-c', 'copy',
+                    '-movflags', '+faststart',
+                    output_path
+                ]
+            finally:
+                # Clean up temp files
+                for temp_file in temp_files:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
         
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
@@ -497,27 +524,24 @@ def generate_combinations(project_id):
         for combo_index, combo in enumerate(all_combos[:limit]):
             combo_id = f"combo_{project_id}_{combo_index}"
             
-            # Fast render using concat -c copy
+            # Fast render using concat -c copy (synchronous for instant completion)
             unified_files = [m['unified_path'] for m in combo]
             output_filename = f"render_{combo_id}.mp4"
             output_path = os.path.join(RENDERS_FOLDER, output_filename)
             
-            # Render in background
-            def render_task():
-                fast_concat_videos(unified_files, output_path)
+            # Check if already rendered
+            output_exists = os.path.exists(output_path)
             
-            thread = threading.Thread(target=render_task)
-            thread.daemon = True
-            thread.start()
+            if not output_exists:
+                # Render synchronously - should be instant with -c copy
+                fast_concat_videos(unified_files, output_path)
+                output_exists = os.path.exists(output_path)
             
             total_duration = sum([
                 3 if m['type'] == 'image' else 
                 get_video_duration(m['unified_path']) 
                 for m in combo
             ])
-            
-            # Check if already rendered
-            output_exists = os.path.exists(output_path)
             
             combo_data = {
                 'id': combo_id,
@@ -527,7 +551,7 @@ def generate_combinations(project_id):
                 'duration': format_duration(total_duration),
                 'duration_seconds': total_duration,
                 'tag': calculate_uniqueness_tag(combo),
-                'preview_status': 'completed' if output_exists else 'processing',
+                'preview_status': 'completed' if output_exists else 'failed',
                 'preview_url': f'/renders/{output_filename}' if output_exists else None
             }
             combinations.append(combo_data)

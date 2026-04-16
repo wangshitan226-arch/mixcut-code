@@ -265,7 +265,7 @@ export default function EditScreen({
         </div>
         <button 
           onClick={onSynthesize}
-          disabled={isLoading || sortedShots.every(s => s.materials.length === 0)}
+          disabled={isLoading || sortedShots.every(s => (s.materials?.length || 0) === 0)}
           className="w-full bg-blue-600 text-white font-medium py-3 rounded-xl shadow-md shadow-blue-200 active:scale-[0.98] transition-transform disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
         >
           {isLoading ? (

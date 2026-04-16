@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { ChevronLeft, CheckCircle2, Circle, Clock, Download, Play, Loader2, Pause, Square } from 'lucide-react';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = '';
 
 interface Material {
   id: string;

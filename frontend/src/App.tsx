@@ -49,6 +49,26 @@ export default function App() {
   // Create or get existing project
   useEffect(() => {
     const initProject = async () => {
+      // Check URL params first
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlProjectId = urlParams.get('projectId');
+      
+      if (urlProjectId) {
+        // Try to fetch project from URL param
+        try {
+          const response = await fetch(`${API_BASE_URL}/api/projects/${urlProjectId}`);
+          if (response.ok) {
+            const project = await response.json();
+            setProjectId(project.id);
+            setShots(project.shots);
+            localStorage.setItem('mixcut_project_id', project.id.toString());
+            return;
+          }
+        } catch (e) {
+          console.log('Failed to fetch project from URL param');
+        }
+      }
+      
       // Check if we have a saved project ID
       const savedProjectId = localStorage.getItem('mixcut_project_id');
       

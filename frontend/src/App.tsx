@@ -156,6 +156,27 @@ export default function App() {
 
   const [selectedQuality, setSelectedQuality] = useState<'low' | 'medium' | 'high' | 'ultra'>('medium');
 
+  // Load existing renders when entering results tab
+  useEffect(() => {
+    const loadExistingRenders = async () => {
+      if (!projectId || mainTab !== 'results') return;
+      
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/projects/${projectId}/renders`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.combinations && data.combinations.length > 0) {
+            setCombinations(data.combinations);
+          }
+        }
+      } catch (e) {
+        console.log('Failed to load existing renders:', e);
+      }
+    };
+    
+    loadExistingRenders();
+  }, [mainTab, projectId]);
+
   const handleSynthesize = async () => {
     if (!projectId) {
       alert('项目未初始化');

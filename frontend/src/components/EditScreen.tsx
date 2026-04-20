@@ -10,6 +10,8 @@ interface Material {
   thumbnail: string;
   duration?: string;
   name: string;
+  transcode_status?: 'processing' | 'completed' | 'failed';
+  transcode_task_id?: string;
 }
 
 interface Shot {
@@ -56,6 +58,50 @@ export default function EditScreen({
   const [uploading, setUploading] = useState<{ shotId: number | null; progress: number }>({ shotId: null, progress: 0 });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeShotId, setActiveShotId] = useState<number | null>(null);
+  const [transcodingMaterials, setTranscodingMaterials] = useState<Set<string>>(new Set());
+
+  // Check if any material is transcoding
+  const hasTranscodingMaterials = React.useMemo(() => {
+    return shots.some(shot => 
+      shot.materials.some(mat => 
+        mat.transcode_status === 'processing' || transcodingMaterials.has(mat.id)
+      )
+    );
+  }, [shots, transcodingMaterials]);
+
+  // Poll transcoding status
+  React.useEffect(() => {
+    const interval = setInterval(async () => {
+      const processingMaterials = shots.flatMap(shot => 
+        shot.materials.filter(mat => mat.transcode_status === 'processing' && mat.transcode_task_id)
+      );
+      
+      if (processingMaterials.length === 0) return;
+      
+      for (const mat of processingMaterials) {
+        try {
+          const response = await fetch(`${API_BASE_URL}/api/transcode/${mat.transcode_task_id}/status`);
+          if (response.ok) {
+            const data = await response.json();
+            if (data.status === 'completed') {
+              setTranscodingMaterials(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(mat.id);
+                return newSet;
+              });
+              onRefresh(); // Refresh to get updated status
+            } else if (data.status === 'processing') {
+              setTranscodingMaterials(prev => new Set(prev).add(mat.id));
+            }
+          }
+        } catch (error) {
+          console.error('查询转码状态失败:', error);
+        }
+      }
+    }, 2000);
+    
+    return () => clearInterval(interval);
+  }, [shots, onRefresh]);
 
   const handleAddMaterialClick = (shotId: number) => {
     setActiveShotId(shotId);
@@ -265,13 +311,18 @@ export default function EditScreen({
         </div>
         <button 
           onClick={onSynthesize}
-          disabled={isLoading || sortedShots.every(s => (s.materials?.length || 0) === 0)}
+          disabled={isLoading || hasTranscodingMaterials || sortedShots.every(s => (s.materials?.length || 0) === 0)}
           className="w-full bg-blue-600 text-white font-medium py-3 rounded-xl shadow-md shadow-blue-200 active:scale-[0.98] transition-transform disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
         >
           {isLoading ? (
             <>
               <Loader2 size={18} className="animate-spin" />
               生成中...
+            </>
+          ) : hasTranscodingMaterials ? (
+            <>
+              <Loader2 size={18} className="animate-spin" />
+              转码中...
             </>
           ) : (
             '开始合成视频'

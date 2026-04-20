@@ -122,78 +122,242 @@ export default function ResultsScreen({
     setResults(results.map(r => r.id === id ? { ...r, selected: !r.selected } : r));
   };
 
-  const handlePlay = useCallback((item: ResultItem) => {
+  // Trigger fast concat for a combination
+  const triggerConcat = async (item: ResultItem) => {
+    try {
+      // Update status to processing
+      setResults(prev => prev.map(r => 
+        r.id === item.id ? { ...r, preview_status: 'processing' } : r
+      ));
+      
+      const response = await fetch(`${API_BASE_URL}/api/combinations/${item.id}/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (!response.ok) throw new Error('启动拼接失败');
+      
+      const data = await response.json();
+      
+      if (data.status === 'completed') {
+        // Already exists, update and play
+        setResults(prev => prev.map(r => 
+          r.id === item.id ? { ...r, preview_status: 'completed', preview_url: data.video_url } : r
+        ));
+        return data.video_url;
+      } else if (data.status === 'processing') {
+        // Wait for completion
+        const taskId = data.task_id;
+        return await waitForConcat(taskId, item.id);
+      }
+    } catch (error) {
+      console.error('拼接失败:', error);
+      setResults(prev => prev.map(r => 
+        r.id === item.id ? { ...r, preview_status: 'failed' } : r
+      ));
+      return null;
+    }
+  };
+  
+  // Poll for concat completion
+  const waitForConcat = async (taskId: string, itemId: string): Promise<string | null> => {
+    return new Promise((resolve) => {
+      const checkInterval = setInterval(async () => {
+        try {
+          const response = await fetch(`${API_BASE_URL}/api/tasks/${taskId}/status`);
+          const data = await response.json();
+          
+          if (data.status === 'completed') {
+            clearInterval(checkInterval);
+            setResults(prev => prev.map(r => 
+              r.id === itemId ? { ...r, preview_status: 'completed', preview_url: data.video_url } : r
+            ));
+            resolve(data.video_url);
+          } else if (data.status === 'failed') {
+            clearInterval(checkInterval);
+            setResults(prev => prev.map(r => 
+              r.id === itemId ? { ...r, preview_status: 'failed' } : r
+            ));
+            resolve(null);
+          }
+          // Continue polling if processing
+        } catch (error) {
+          console.error('查询拼接状态失败:', error);
+        }
+      }, 500); // Check every 500ms
+      
+      // Timeout after 30 seconds
+      setTimeout(() => {
+        clearInterval(checkInterval);
+        resolve(null);
+      }, 30000);
+    });
+  };
+
+  const handlePlay = useCallback(async (item: ResultItem) => {
+    // If already playing, stop
+    if (playingId === item.id) {
+      setPlayingId(null);
+      return;
+    }
+    
+    // If already has video URL, play directly
     if (item.preview_status === 'completed' && item.preview_url) {
-      setPlayingId(playingId === item.id ? null : item.id);
+      setPlayingId(item.id);
+      return;
+    }
+    
+    // For pending items: show player immediately, generate in background
+    if (item.preview_status === 'pending' || item.preview_status === 'failed') {
+      // Set a temporary loading state for this item
+      setResults(prev => prev.map(r => 
+        r.id === item.id ? { ...r, preview_status: 'loading' } : r
+      ));
+      setPlayingId(item.id);
+      
+      // Trigger concat in background
+      triggerConcat(item).then(videoUrl => {
+        if (videoUrl) {
+          // Video ready, update status (player will auto-load)
+          setResults(prev => prev.map(r => 
+            r.id === item.id ? { ...r, preview_status: 'completed', preview_url: videoUrl } : r
+          ));
+        } else {
+          // Failed, show error
+          setResults(prev => prev.map(r => 
+            r.id === item.id ? { ...r, preview_status: 'failed' } : r
+          ));
+          setPlayingId(null);
+        }
+      });
     }
   }, [playingId]);
 
-  const handleDownload = useCallback(async (item: ResultItem, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setDownloadingIds(prev => new Set(prev).add(item.id));
-    
+  // Check if device is mobile
+  const isMobile = () => {
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  };
+
+  // Check if Web Share API is supported
+  const canUseWebShare = () => {
+    return navigator.share && navigator.canShare;
+  };
+
+  // Download video using Web Share API (mobile) or Blob (desktop)
+  const downloadVideo = async (videoUrl: string, filename: string) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/combinations/${item.id}/download`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ quality: defaultQuality })
-      });
-
-      if (!response.ok) throw new Error('下载失败');
-
-      const data = await response.json();
-      const taskId = data.task_id;
-
-      const pollInterval = setInterval(async () => {
-        const statusResponse = await fetch(`${API_BASE_URL}/api/tasks/${taskId}/status`);
-        const statusData = await statusResponse.json();
-
-        if (statusData.status === 'completed') {
-          clearInterval(pollInterval);
-          setDownloadingIds(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(item.id);
-            return newSet;
+      setDownloadingIds(prev => new Set(prev).add(filename));
+      
+      const response = await fetch(videoUrl);
+      if (!response.ok) throw new Error('获取视频失败');
+      
+      const blob = await response.blob();
+      const file = new File([blob], filename, { type: 'video/mp4' });
+      
+      // Try Web Share API on mobile (allows saving to gallery)
+      if (isMobile() && canUseWebShare() && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: 'MixCut 视频',
+            text: '下载的视频'
           });
-          
-          const downloadUrl = `${API_BASE_URL}${statusData.video_url}`;
-          const link = document.createElement('a');
-          link.href = downloadUrl;
-          link.download = `mixcut_${item.id}.mp4`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-        } else if (statusData.status === 'failed') {
-          clearInterval(pollInterval);
-          setDownloadingIds(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(item.id);
-            return newSet;
-          });
-          alert('视频生成失败：' + (statusData.error || '未知错误'));
+          // Share successful
+          return;
+        } catch (shareError) {
+          // User cancelled share or failed, fallback to blob download
+          console.log('Web Share failed, using fallback:', shareError);
         }
-      }, 1000);
-
+      }
+      
+      // Fallback: Blob download (desktop or Web Share not supported)
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+      
     } catch (error) {
       console.error('下载失败:', error);
+      alert('下载失败：' + (error instanceof Error ? error.message : '请重试'));
+    } finally {
       setDownloadingIds(prev => {
         const newSet = new Set(prev);
-        newSet.delete(item.id);
+        newSet.delete(filename);
         return newSet;
       });
-      alert('下载失败，请重试');
+    }
+  };
+
+  // Production mode: direct download via backend (suitable for large files, OSS/CDN)
+  const directDownloadVideo = (downloadUrl: string) => {
+    // Use iframe for download to avoid opening new tab
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = downloadUrl;
+    document.body.appendChild(iframe);
+    
+    // Remove iframe after download starts
+    setTimeout(() => {
+      document.body.removeChild(iframe);
+    }, 5000);
+  };
+
+  const handleDownload = useCallback(async (item: ResultItem, e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    let videoUrl = item.preview_url;
+    
+    // If video not ready, trigger concat first
+    if (item.preview_status !== 'completed' || !videoUrl) {
+      videoUrl = await triggerConcat(item);
+      if (!videoUrl) {
+        alert('视频拼接失败，请重试');
+        return;
+      }
+    }
+    
+    // Now download the video
+    try {
+      await downloadVideo(`${API_BASE_URL}${videoUrl}`, `mixcut_${item.id}.mp4`);
+    } catch (error) {
+      console.error('下载失败:', error);
+      alert('下载失败：' + (error instanceof Error ? error.message : '请重试'));
     }
   }, [defaultQuality]);
 
   const handleBatchDownload = useCallback(async () => {
     const selectedItems = results.filter(r => r.selected);
-    if (selectedItems.length === 0) return;
-    
-    for (const item of selectedItems) {
-      await handleDownload(item, { stopPropagation: () => {} } as React.MouseEvent);
-      await new Promise(resolve => setTimeout(resolve, 500));
+    if (selectedItems.length === 0) {
+      alert('请先选择要下载的视频');
+      return;
     }
-  }, [results, handleDownload]);
+    
+    // Process all selected items
+    for (const item of selectedItems) {
+      try {
+        let videoUrl = item.preview_url;
+        
+        // Ensure video is ready
+        if (item.preview_status !== 'completed' || !videoUrl) {
+          videoUrl = await triggerConcat(item);
+        }
+        
+        // Download
+        if (videoUrl) {
+          await downloadVideo(`${API_BASE_URL}${videoUrl}`, `mixcut_${item.id}.mp4`);
+        }
+        
+        // Small delay between downloads
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } catch (error) {
+        console.error('批量下载失败:', error);
+      }
+    }
+  }, [results]);
 
   const filteredResults = activeFilter === '全部' 
     ? results 
@@ -279,19 +443,28 @@ export default function ResultsScreen({
                   }`}
                 >
                   <div className="relative w-full" style={{ paddingBottom: '177.78%' }}>
-                    {isPlaying && item.preview_url ? (
-                      // Playing state - show video
+                    {isPlaying ? (
+                      // Playing state - show video player
                       <div className="absolute inset-0 bg-black">
-                        <video
-                          src={`${API_BASE_URL}${item.preview_url}`}
-                          className="w-full h-full object-contain"
-                          controls
-                          autoPlay
-                          playsInline
-                        />
+                        {item.preview_url ? (
+                          // Video ready - play it
+                          <video
+                            src={`${API_BASE_URL}${item.preview_url}`}
+                            className="w-full h-full object-contain"
+                            controls
+                            autoPlay
+                            playsInline
+                          />
+                        ) : (
+                          // Video loading - show spinner
+                          <div className="absolute inset-0 flex flex-col items-center justify-center text-white">
+                            <Loader2 size={32} className="animate-spin mb-2" />
+                            <span className="text-xs text-gray-400">加载中...</span>
+                          </div>
+                        )}
                         <button
                           onClick={() => setPlayingId(null)}
-                          className="absolute top-1 right-1 w-6 h-6 bg-black/50 rounded-full flex items-center justify-center text-white"
+                          className="absolute top-1 right-1 w-6 h-6 bg-black/50 rounded-full flex items-center justify-center text-white z-10"
                         >
                           <Square size={12} fill="currentColor" />
                         </button>
@@ -305,31 +478,15 @@ export default function ResultsScreen({
                           className="w-full h-full object-cover"
                         />
                         
-                        {/* Status Overlay */}
-                        {item.preview_status !== 'completed' && (
-                          <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center text-white">
-                            {item.preview_status === 'processing' ? (
-                              <Loader2 size={24} className="animate-spin mb-1" />
-                            ) : (
-                              <Clock size={24} className="mb-1 opacity-50" />
-                            )}
-                            <span className={`text-[10px] ${statusDisplay.color}`}>
-                              {statusDisplay.text}
-                            </span>
+                        {/* Play Button - always show */}
+                        <button
+                          onClick={() => handlePlay(item)}
+                          className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/50 transition-colors"
+                        >
+                          <div className="w-10 h-10 bg-white/90 rounded-full flex items-center justify-center">
+                            <Play size={18} className="text-blue-600 ml-0.5" fill="currentColor" />
                           </div>
-                        )}
-                        
-                        {/* Play Button - only for completed previews */}
-                        {item.preview_status === 'completed' && !downloadingIds.has(item.id) && (
-                          <button
-                            onClick={() => handlePlay(item)}
-                            className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/50 transition-colors"
-                          >
-                            <div className="w-10 h-10 bg-white/90 rounded-full flex items-center justify-center">
-                              <Play size={18} className="text-blue-600 ml-0.5" fill="currentColor" />
-                            </div>
-                          </button>
-                        )}
+                        </button>
                         
                         {/* Downloading Overlay */}
                         {downloadingIds.has(item.id) && (

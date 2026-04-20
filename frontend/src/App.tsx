@@ -5,11 +5,13 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
-  Home, Scissors, LayoutGrid
+  Home, Scissors, LayoutGrid, User
 } from 'lucide-react';
+import { UserProvider, useUser } from './contexts/UserContext';
 import HomeScreen from './components/HomeScreen';
 import EditScreen from './components/EditScreen';
 import ResultsScreen from './components/ResultsScreen';
+import ProfileScreen from './components/ProfileScreen';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
 
@@ -39,136 +41,73 @@ interface Combination {
   tag: string;
 }
 
+// Main App Component wrapped with UserProvider
 export default function App() {
-  const [mainTab, setMainTab] = useState<'home' | 'edit' | 'results'>('home');
-  const [projectId, setProjectId] = useState<number | null>(null);
+  return (
+    <UserProvider>
+      <AppContent />
+    </UserProvider>
+  );
+}
+
+function AppContent() {
+  const [mainTab, setMainTab] = useState<'home' | 'edit' | 'results' | 'profile'>('home');
+  const { user, isLoading: userLoading, setOnLogoutCallback } = useUser();
   const [shots, setShots] = useState<Shot[]>([]);
   const [combinations, setCombinations] = useState<Combination[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [selectedQuality, setSelectedQuality] = useState<'low' | 'medium' | 'high' | 'ultra'>('medium');
 
-  // Create or get existing project
+  // Set up logout callback to clear app state
   useEffect(() => {
-    const initProject = async () => {
-      // Check URL params first
-      const urlParams = new URLSearchParams(window.location.search);
-      const urlProjectId = urlParams.get('projectId');
-      
-      if (urlProjectId) {
-        // Try to fetch project from URL param
-        try {
-          const response = await fetch(`${API_BASE_URL}/api/projects/${urlProjectId}`);
-          if (response.ok) {
-            const project = await response.json();
-            setProjectId(project.id);
-            setShots(project.shots);
-            localStorage.setItem('mixcut_project_id', project.id.toString());
-            return;
-          }
-        } catch (e) {
-          console.log('Failed to fetch project from URL param');
-        }
-      }
-      
-      // Check if we have a saved project ID
-      const savedProjectId = localStorage.getItem('mixcut_project_id');
-      
-      if (savedProjectId) {
-        // Try to fetch existing project
-        try {
-          const response = await fetch(`${API_BASE_URL}/api/projects/${savedProjectId}`);
-          if (response.ok) {
-            const project = await response.json();
-            setProjectId(project.id);
-            setShots(project.shots);
-            return;
-          } else {
-            // Project not found, clear localStorage and continue to create new
-            localStorage.removeItem('mixcut_project_id');
-            // Continue to create new project below
-          }
-        } catch (e) {
-          console.log('Failed to fetch existing project');
-          localStorage.removeItem('mixcut_project_id');
-          // Continue to create new project below
-        }
-      }
-      
-      // Create new project
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/projects`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: '我的混剪项目' })
-        });
-        
-        if (response.ok) {
-          const project = await response.json();
-          setProjectId(project.id);
-          localStorage.setItem('mixcut_project_id', project.id.toString());
-          
-          // Create default shots
-          await createDefaultShots(project.id);
-        }
-      } catch (e) {
-        console.error('Failed to create project:', e);
-      }
-    };
-    
-    initProject();
-  }, []);
+    setOnLogoutCallback(() => {
+      // Clear all user-related state when logging out
+      setCombinations([]);
+      setShots([]);
+      setMainTab('home');
+    });
 
-  const createDefaultShots = async (pid: number) => {
-    const defaultShots = ['镜头1', '镜头2', '镜头3'];
-    const newShots: Shot[] = [];
-    
-    for (const name of defaultShots) {
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/projects/${pid}/shots`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name })
-        });
-        
-        if (response.ok) {
-          const shot = await response.json();
-          newShots.push(shot);
-        }
-      } catch (e) {
-        console.error('Failed to create shot:', e);
-      }
-    }
-    
-    setShots(newShots);
-  };
+    // Cleanup callback on unmount
+    return () => {
+      setOnLogoutCallback(undefined);
+    };
+  }, [setOnLogoutCallback]);
 
   // Refresh shots data from backend
   const refreshShots = async () => {
-    if (!projectId) return;
+    if (!user?.id) return;
     
     try {
-      const response = await fetch(`${API_BASE_URL}/api/projects/${projectId}`);
+      const response = await fetch(`${API_BASE_URL}/api/shots?user_id=${user.id}`);
       if (response.ok) {
-        const project = await response.json();
-        setShots(project.shots);
+        const data = await response.json();
+        setShots(data.shots);
       }
     } catch (e) {
       console.error('Failed to refresh shots:', e);
     }
   };
 
-  const [selectedQuality, setSelectedQuality] = useState<'low' | 'medium' | 'high' | 'ultra'>('medium');
+  // Load shots when user is available
+  useEffect(() => {
+    if (user?.id) {
+      refreshShots();
+    }
+  }, [user?.id]);
 
   // Load existing renders when entering results tab
   useEffect(() => {
     const loadExistingRenders = async () => {
-      if (!projectId || mainTab !== 'results') return;
+      if (!user?.id || mainTab !== 'results') return;
       
       try {
-        const response = await fetch(`${API_BASE_URL}/api/projects/${projectId}/renders`);
+        const response = await fetch(`${API_BASE_URL}/api/renders?user_id=${user.id}`);
         if (response.ok) {
           const data = await response.json();
           if (data.combinations && data.combinations.length > 0) {
             setCombinations(data.combinations);
+          } else {
+            setCombinations([]);
           }
         }
       } catch (e) {
@@ -177,11 +116,11 @@ export default function App() {
     };
     
     loadExistingRenders();
-  }, [mainTab, projectId]);
+  }, [mainTab, user?.id]);
 
   const handleSynthesize = async () => {
-    if (!projectId) {
-      alert('项目未初始化');
+    if (!user?.id) {
+      alert('用户未初始化');
       return;
     }
 
@@ -196,44 +135,54 @@ export default function App() {
     setIsLoading(true);
     
     try {
-      // Generate combinations only (no pre-rendering)
-      const response = await fetch(`${API_BASE_URL}/api/projects/${projectId}/generate`, {
+      const response = await fetch(`${API_BASE_URL}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
+          user_id: user.id,
           limit: 1000 
         })
       });
 
       if (!response.ok) {
-        throw new Error('生成组合失败');
+        const errorData = await response.json();
+        
+        // Handle transcoding in progress error
+        if (errorData.code === 'TRANSCODING_IN_PROGRESS') {
+          const materialNames = errorData.transcoding_materials?.map((m: any) => m.name).join(', ');
+          alert(`以下素材正在转码中，请等待转码完成后再生成：\n${materialNames}`);
+          return;
+        }
+        
+        throw new Error(errorData.error || '生成组合失败');
       }
 
       const data = await response.json();
       setCombinations(data.combinations);
       setMainTab('results');
-    } catch (error) {
+    } catch (error: any) {
       console.error('合成失败:', error);
-      alert('合成失败，请重试');
+      alert(error.message || '合成失败，请重试');
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleAddShot = async () => {
-    if (!projectId) return;
+    if (!user?.id) return;
     
     try {
-      const response = await fetch(`${API_BASE_URL}/api/projects/${projectId}/shots`, {
+      const response = await fetch(`${API_BASE_URL}/api/shots`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: `镜头${shots.length + 1}` })
+        body: JSON.stringify({ user_id: user.id, name: `镜头${shots.length + 1}` })
       });
       
       if (response.ok) {
         const shot = await response.json();
-        // Ensure new shot has materials array to prevent white screen
         setShots([...shots, { ...shot, materials: [] }]);
+        // Clear combinations when adding new shot (materials changed)
+        setCombinations([]);
       }
     } catch (e) {
       console.error('Failed to add shot:', e);
@@ -248,6 +197,8 @@ export default function App() {
       
       if (response.ok) {
         setShots(shots.filter(s => s.id !== shotId));
+        // Clear combinations when deleting shot (materials changed)
+        setCombinations([]);
       }
     } catch (e) {
       console.error('Failed to delete shot:', e);
@@ -262,10 +213,19 @@ export default function App() {
       
       if (response.ok) {
         await refreshShots();
+        // Clear combinations when deleting material
+        setCombinations([]);
       }
     } catch (e) {
       console.error('Failed to delete material:', e);
     }
+  };
+
+  // Handle material upload success - clear combinations
+  const handleMaterialUploaded = () => {
+    // Clear combinations when new material is uploaded
+    setCombinations([]);
+    refreshShots();
   };
 
   // Refresh data when entering edit tab
@@ -281,16 +241,16 @@ export default function App() {
       <div className="flex-1 overflow-hidden flex flex-col">
         {mainTab === 'home' && <HomeScreen onNavigate={() => setMainTab('edit')} />}
         {mainTab === 'edit' && (
-          projectId ? (
+          user?.id ? (
             <EditScreen 
-              projectId={projectId}
+              userId={user.id}
               shots={shots}
               onBack={() => setMainTab('home')} 
               onSynthesize={handleSynthesize}
               onAddShot={handleAddShot}
               onDeleteShot={handleDeleteShot}
               onDeleteMaterial={handleDeleteMaterial}
-              onRefresh={refreshShots}
+              onRefresh={handleMaterialUploaded}
               isLoading={isLoading}
               selectedQuality={selectedQuality}
               onQualityChange={setSelectedQuality}
@@ -308,6 +268,9 @@ export default function App() {
             combinations={combinations}
             defaultQuality={selectedQuality}
           />
+        )}
+        {mainTab === 'profile' && (
+          <ProfileScreen onNavigate={(tab) => setMainTab(tab as any)} />
         )}
       </div>
 
@@ -333,6 +296,13 @@ export default function App() {
         >
           <LayoutGrid size={24} className={mainTab === 'results' ? 'fill-blue-100' : ''} />
           <span className="text-[10px] font-medium">作品结果</span>
+        </button>
+        <button 
+          onClick={() => setMainTab('profile')}
+          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'profile' ? 'text-blue-600' : 'text-gray-400'}`}
+        >
+          <User size={24} className={mainTab === 'profile' ? 'fill-blue-100' : ''} />
+          <span className="text-[10px] font-medium">我的</span>
         </button>
       </div>
     </div>

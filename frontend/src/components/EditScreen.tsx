@@ -1,7 +1,10 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { ChevronLeft, Mic, Trash2, Plus, Film, Image as ImageIcon, Loader2 } from 'lucide-react';
+import { io, Socket } from 'socket.io-client';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+const WS_BASE_URL = API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
+const POLLING_INTERVAL = 200; // 200ms轮询间隔，作为WebSocket的fallback
 
 interface Material {
   id: string;
@@ -22,7 +25,7 @@ interface Shot {
 }
 
 interface EditScreenProps {
-  projectId: number;
+  userId: string;
   shots: Shot[];
   onBack: () => void;
   onSynthesize: () => void;
@@ -43,7 +46,7 @@ const QUALITY_OPTIONS = [
 ];
 
 export default function EditScreen({ 
-  projectId, 
+  userId, 
   shots, 
   onBack, 
   onSynthesize, 
@@ -59,6 +62,17 @@ export default function EditScreen({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeShotId, setActiveShotId] = useState<number | null>(null);
   const [transcodingMaterials, setTranscodingMaterials] = useState<Set<string>>(new Set());
+  
+  // WebSocket连接
+  const socketRef = useRef<Socket | null>(null);
+  
+  // Use ref to access latest shots without triggering effect recreation
+  const shotsRef = useRef(shots);
+  shotsRef.current = shots;
+  
+  // Use ref to access onRefresh without triggering effect recreation
+  const onRefreshRef = useRef(onRefresh);
+  onRefreshRef.current = onRefresh;
 
   // Check if any material is transcoding
   const hasTranscodingMaterials = React.useMemo(() => {
@@ -69,39 +83,173 @@ export default function EditScreen({
     );
   }, [shots, transcodingMaterials]);
 
-  // Poll transcoding status
+  // WebSocket连接 - 零延迟接收转码完成通知
+  useEffect(() => {
+    console.log('[WebSocket] Initializing connection...');
+    
+    // 创建Socket连接
+    const socket = io(API_BASE_URL, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+    });
+    
+    socketRef.current = socket;
+    
+    socket.on('connect', () => {
+      console.log('[WebSocket] Connected:', socket.id);
+      // 注册当前用户，接收该用户的转码通知
+      socket.emit('register', { user_id: userId });
+    });
+    
+    socket.on('registered', (data) => {
+      console.log('[WebSocket] Registered:', data);
+    });
+    
+    // 监听转码完成事件（零延迟推送）
+    socket.on('transcode_complete', (data) => {
+      console.log('[WebSocket] Transcode complete received:', data);
+      
+      // 立即更新状态
+      setTranscodingMaterials(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(data.material_id);
+        return newSet;
+      });
+      
+      // 立即刷新获取最新状态
+      onRefreshRef.current();
+    });
+    
+    socket.on('disconnect', () => {
+      console.log('[WebSocket] Disconnected');
+    });
+    
+    socket.on('error', (error) => {
+      console.error('[WebSocket] Error:', error);
+    });
+    
+    return () => {
+      console.log('[WebSocket] Closing connection');
+      socket.close();
+    };
+  }, [userId]); // 只在userId变化时重新连接
+
+  // Poll transcoding status - 作为WebSocket的fallback
   React.useEffect(() => {
+    console.log('[Polling] Starting transcode status polling (fallback)');
+    
     const interval = setInterval(async () => {
-      const processingMaterials = shots.flatMap(shot => 
-        shot.materials.filter(mat => mat.transcode_status === 'processing' && mat.transcode_task_id)
+      // 从ref获取最新shots，不依赖shots state
+      const currentShots = shotsRef.current;
+      
+      // 获取所有需要检查转码状态的素材（包括processing状态和正在转码中的）
+      const processingMaterials = currentShots.flatMap(shot => 
+        shot.materials.filter(mat => {
+          // 只要有task_id就检查，不限制状态
+          if (!mat.transcode_task_id) return false;
+          // 检查processing状态或本地记录的正在转码的素材
+          return mat.transcode_status === 'processing' || transcodingMaterials.has(mat.id);
+        })
       );
       
-      if (processingMaterials.length === 0) return;
+      if (processingMaterials.length === 0) {
+        console.log('[Polling] No processing materials to check');
+        return;
+      }
+      
+      console.log(`[Polling] Checking ${processingMaterials.length} materials`);
       
       for (const mat of processingMaterials) {
         try {
+          console.log(`[Polling] Checking status for ${mat.id}, task: ${mat.transcode_task_id}`);
           const response = await fetch(`${API_BASE_URL}/api/transcode/${mat.transcode_task_id}/status`);
           if (response.ok) {
             const data = await response.json();
+            console.log(`[Polling] Status for ${mat.id}: ${data.status}`);
+            
             if (data.status === 'completed') {
+              console.log(`[Polling] Material ${mat.id} completed!`);
               setTranscodingMaterials(prev => {
                 const newSet = new Set(prev);
                 newSet.delete(mat.id);
                 return newSet;
               });
-              onRefresh(); // Refresh to get updated status
+              // 立即刷新获取最新状态
+              onRefreshRef.current();
             } else if (data.status === 'processing') {
               setTranscodingMaterials(prev => new Set(prev).add(mat.id));
             }
           }
         } catch (error) {
-          console.error('查询转码状态失败:', error);
+          console.error('[Polling] 查询转码状态失败:', error);
         }
       }
-    }, 2000);
+    }, POLLING_INTERVAL);
     
-    return () => clearInterval(interval);
-  }, [shots, onRefresh]);
+    return () => {
+      console.log('[Polling] Stopping transcode status polling');
+      clearInterval(interval);
+    };
+  }, []); // 空依赖数组，只在组件挂载时启动轮询
+
+  // 立即检查转码状态（上传成功后调用）
+  const checkTranscodeStatusImmediately = async (taskId: string, materialId: string) => {
+    console.log(`[Immediate Check] Starting for material ${materialId}, task ${taskId}`);
+    
+    const checkStatus = async (): Promise<boolean> => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/transcode/${taskId}/status`);
+        if (response.ok) {
+          const data = await response.json();
+          console.log(`[Immediate Check] Status for ${materialId}: ${data.status}`);
+          
+          if (data.status === 'completed') {
+            console.log(`[Immediate Check] Material ${materialId} completed!`);
+            setTranscodingMaterials(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(materialId);
+              return newSet;
+            });
+            // 立即刷新获取最新状态
+            onRefreshRef.current();
+            return true;
+          } else if (data.status === 'failed') {
+            console.log(`[Immediate Check] Material ${materialId} failed`);
+            setTranscodingMaterials(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(materialId);
+              return newSet;
+            });
+            return true;
+          }
+        }
+      } catch (error) {
+        console.error('[Immediate Check] Error:', error);
+      }
+      return false;
+    };
+    
+    // 立即检查一次
+    let isCompleted = await checkStatus();
+    if (isCompleted) return;
+    
+    // 每200ms检查一次，最多检查30次（6秒）
+    let checkCount = 0;
+    const maxChecks = 30;
+    
+    const intervalId = setInterval(async () => {
+      checkCount++;
+      isCompleted = await checkStatus();
+      
+      if (isCompleted || checkCount >= maxChecks) {
+        clearInterval(intervalId);
+        if (checkCount >= maxChecks) {
+          console.log(`[Immediate Check] Max checks reached for ${materialId}`);
+        }
+      }
+    }, 200);
+  };
 
   const handleAddMaterialClick = (shotId: number) => {
     setActiveShotId(shotId);
@@ -126,6 +274,7 @@ export default function EditScreen({
     try {
       const formData = new FormData();
       formData.append('file', file);
+      formData.append('user_id', userId);
       formData.append('shotId', activeShotId.toString());
       formData.append('quality', selectedQuality);
 
@@ -154,10 +303,26 @@ export default function EditScreen({
         xhr.send(formData);
       });
 
-      await uploadPromise;
+      const result = await uploadPromise;
+      console.log('[Upload] Upload completed, result:', result);
+      
+      // 立即将新素材加入转码跟踪（如果有转码任务）
+      if (result.transcode_task_id) {
+        console.log('[Upload] Adding material to transcoding tracking:', result.id);
+        setTranscodingMaterials(prev => new Set(prev).add(result.id));
+      }
       
       // Refresh shots data from backend
       onRefresh();
+      
+      // 立即开始检查转码状态（不等待轮询）
+      if (result.transcode_task_id) {
+        console.log('[Upload] Starting immediate transcode status check');
+        // 延迟100ms后开始检查，给后端一点时间启动转码
+        setTimeout(() => {
+          checkTranscodeStatusImmediately(result.transcode_task_id, result.id);
+        }, 100);
+      }
 
     } catch (error) {
       console.error('上传失败:', error);

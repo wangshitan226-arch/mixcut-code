@@ -1,30 +1,95 @@
-"""Shot routes"""
+"""
+Shot management routes
+"""
 from flask import Blueprint, request, jsonify
 import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from models import db, Project, Shot
+from models import User, Shot
+from extensions import db, transcode_tasks
 
 shots_bp = Blueprint('shots', __name__, url_prefix='/api')
 
 
-@shots_bp.route('/projects/<int:project_id>/shots', methods=['POST'])
-def create_shot(project_id):
-    """Create a new shot"""
-    project = Project.query.get(project_id)
-    if not project:
-        return jsonify({'error': '项目不存在'}), 404
+@shots_bp.route('/shots', methods=['GET'])
+def get_shots():
+    """Get all shots for a user"""
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({'error': '缺少user_id参数'}), 400
+    
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': '用户不存在'}), 404
     
     try:
-        data = request.json or {}
-        max_sequence = max([s.sequence for s in project.shots] + [-1])
+        shots_data = []
+        for shot in sorted(user.shots, key=lambda x: x.sequence):
+            materials_data = []
+            for mat in shot.materials:
+                # Determine transcode status
+                task_id = f"transcode_{mat.id}"
+                
+                # 优先检查内存中的任务状态（最快）
+                if task_id in transcode_tasks:
+                    task = transcode_tasks[task_id]
+                    if task['status'] == 'completed':
+                        transcode_status = 'completed'
+                        transcode_task_id = task_id
+                    elif task['status'] == 'processing':
+                        transcode_status = 'processing'
+                        transcode_task_id = task_id
+                    else:  # failed
+                        transcode_status = 'failed'
+                        transcode_task_id = task_id
+                # 其次检查数据库和文件系统
+                elif mat.unified_path and os.path.exists(mat.unified_path):
+                    transcode_status = 'completed'
+                    transcode_task_id = None
+                else:
+                    transcode_status = 'pending'
+                    transcode_task_id = None
+                
+                materials_data.append({
+                    'id': mat.id,
+                    'type': mat.type,
+                    'url': f'/uploads/{os.path.basename(mat.file_path)}',
+                    'thumbnail': f'/uploads/thumbnails/{os.path.basename(mat.thumbnail_path)}',
+                    'duration': mat.duration,
+                    'name': mat.original_name,
+                    'transcode_status': transcode_status,
+                    'transcode_task_id': transcode_task_id
+                })
+            
+            shots_data.append({
+                'id': shot.id,
+                'name': shot.name,
+                'sequence': shot.sequence,
+                'materials': materials_data
+            })
         
+        return jsonify({'shots': shots_data})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@shots_bp.route('/shots', methods=['POST'])
+def create_shot():
+    """Create a new shot"""
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({'error': '缺少user_id'}), 400
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        shot_count = len(user.shots)
         shot = Shot(
-            project_id=project_id,
-            name=data.get('name', f'镜头{max_sequence + 2}'),
-            sequence=max_sequence + 1
+            user_id=user_id,
+            name=data.get('name', f'镜头{shot_count + 1}'),
+            sequence=shot_count
         )
         db.session.add(shot)
         db.session.commit()
@@ -36,35 +101,20 @@ def create_shot(project_id):
             'materials': []
         })
     except Exception as e:
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 
 @shots_bp.route('/shots/<int:shot_id>', methods=['DELETE'])
 def delete_shot(shot_id):
-    """Delete a shot and all its materials"""
-    from models import Material, Render
-    import json
-    
+    """Delete a shot"""
     try:
         shot = Shot.query.get_or_404(shot_id)
-        project_id = shot.project_id
         
-        # Delete all material files first
         for material in shot.materials:
             for path in [material.file_path, material.unified_path, material.thumbnail_path]:
                 if path and os.path.exists(path):
                     os.remove(path)
-            
-            # Cleanup renders that contain this material
-            for render in Render.query.filter_by(project_id=project_id).all():
-                try:
-                    material_ids = json.loads(render.material_ids)
-                    if material.id in material_ids:
-                        if render.file_path and os.path.exists(render.file_path):
-                            os.remove(render.file_path)
-                        db.session.delete(render)
-                except:
-                    continue
         
         db.session.delete(shot)
         db.session.commit()

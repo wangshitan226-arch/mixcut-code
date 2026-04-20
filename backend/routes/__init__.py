@@ -1,13 +1,16 @@
-"""Routes package"""
-from flask import Blueprint
+"""
+API Routes (Blueprints)
+"""
+from .auth import auth_bp
+from .users import users_bp
+from .shots import shots_bp
+from .materials import materials_bp
+from .upload import upload_bp
+from .generate import generate_bp
+from .renders import renders_bp
+from .static import static_bp
 
-# Create blueprints for each module
-projects_bp = Blueprint('projects', __name__, url_prefix='/api')
-shots_bp = Blueprint('shots', __name__, url_prefix='/api')
-materials_bp = Blueprint('materials', __name__, url_prefix='/api')
-upload_bp = Blueprint('upload', __name__, url_prefix='/api')
-render_bp = Blueprint('render', __name__, url_prefix='/api')
-download_bp = Blueprint('download', __name__, url_prefix='/api')
-
-# Import routes (to be implemented)
-# from . import projects, shots, materials, upload, render, download
+__all__ = [
+    'auth_bp', 'users_bp', 'shots_bp', 'materials_bp',
+    'upload_bp', 'generate_bp', 'renders_bp', 'static_bp'
+]

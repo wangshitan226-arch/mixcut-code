@@ -41,14 +41,12 @@ const FILTERS = ['全部', '完全不重复', '极低重复率', '普通'];
 interface ResultsScreenProps {
   onBack: () => void;
   combinations?: Combination[];
-  projectId?: number;
   defaultQuality?: 'low' | 'medium' | 'high' | 'ultra';
 }
 
 export default function ResultsScreen({ 
   onBack, 
-  combinations: initialCombinations, 
-  projectId,
+  combinations: initialCombinations,
   defaultQuality = 'medium' 
 }: ResultsScreenProps) {
   const [results, setResults] = useState<ResultItem[]>([]);
@@ -76,40 +74,7 @@ export default function ResultsScreen({
     }
   }, [initialCombinations]);
 
-  // Poll for preview status updates
-  useEffect(() => {
-    if (!projectId) return;
 
-    const pollInterval = setInterval(async () => {
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/projects/${projectId}/previews/status`);
-        const data = await response.json();
-        
-        if (data.statuses) {
-          setResults(prev => prev.map(item => {
-            const status = data.statuses.find((s: any) => s.combo_id === item.id);
-            if (status) {
-              return {
-                ...item,
-                preview_status: status.status,
-                preview_url: status.preview_url
-              };
-            }
-            return item;
-          }));
-          
-          setPreviewProgress({
-            completed: data.completed,
-            total: data.total
-          });
-        }
-      } catch (error) {
-        console.error('Failed to fetch preview status:', error);
-      }
-    }, 2000); // Poll every 2 seconds
-
-    return () => clearInterval(pollInterval);
-  }, [projectId]);
 
   const selectedCount = results.filter(r => r.selected).length;
   const allSelected = selectedCount === results.length && results.length > 0;

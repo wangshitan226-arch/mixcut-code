@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-MixCut Backend - Fast Implementation
-Focus: Upload-time transcoding + fast concat
+MixCut Backend - Refactored with User-based Architecture
+Focus: Upload-time transcoding + fast concat + Data Isolation + User Auth
 """
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 import os
 import uuid
 import subprocess
@@ -17,12 +18,14 @@ from PIL import Image
 import cv2
 import json
 import time
+import re
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
 
 # Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mixcut_fast.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mixcut_refactored.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -30,7 +33,7 @@ db = SQLAlchemy(app)
 # Configuration
 UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
 THUMBNAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'thumbnails')
-UNIFIED_FOLDER = os.path.join(os.getcwd(), 'unified')  # Transcoded files
+UNIFIED_FOLDER = os.path.join(os.getcwd(), 'unified')
 RENDERS_FOLDER = os.path.join(os.getcwd(), 'renders')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'mov', 'avi', 'webm'}
 
@@ -42,23 +45,62 @@ os.makedirs(RENDERS_FOLDER, exist_ok=True)
 
 # Task management
 render_tasks = {}
+transcode_tasks = {}
 
 
-# Database Models
-class Project(db.Model):
-    __tablename__ = 'projects'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(255), default='未命名项目')
-    quality = db.Column(db.String(20), default='medium')  # User selected quality
+# ==================== Database Models ====================
+
+class User(db.Model):
+    """User model supporting both anonymous and registered users"""
+    __tablename__ = 'users'
+    
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    type = db.Column(db.String(20), default='anonymous', nullable=False)
+    
+    # Registration fields (nullable for anonymous users)
+    username = db.Column(db.String(50), unique=True, nullable=True)
+    email = db.Column(db.String(100), unique=True, nullable=True)
+    phone = db.Column(db.String(20), unique=True, nullable=True)
+    password_hash = db.Column(db.String(255), nullable=True)
+    
+    # Profile fields
+    nickname = db.Column(db.String(50), nullable=True)
+    avatar = db.Column(db.String(500), nullable=True)
+    
+    # Status
+    is_active = db.Column(db.Boolean, default=True)
+    
+    # Timestamps
     created_at = db.Column(db.DateTime, default=db.func.now())
-    shots = db.relationship('Shot', backref='project', lazy=True, cascade='all, delete-orphan')
-    materials = db.relationship('Material', secondary='shots', viewonly=True, lazy='dynamic')
+    updated_at = db.Column(db.DateTime, default=db.func.now(), onupdate=db.func.now())
+    last_login_at = db.Column(db.DateTime, nullable=True)
+    
+    # Relationships
+    shots = db.relationship('Shot', backref='user', lazy=True, cascade='all, delete-orphan')
+    materials = db.relationship('Material', backref='user', lazy=True, cascade='all, delete-orphan')
+    renders = db.relationship('Render', backref='user', lazy=True, cascade='all, delete-orphan')
+
+    def to_dict(self, include_sensitive=False):
+        data = {
+            'id': self.id,
+            'type': self.type,
+            'username': self.username,
+            'email': self.email,
+            'phone': self.phone,
+            'nickname': self.nickname,
+            'avatar': self.avatar,
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'last_login_at': self.last_login_at.isoformat() if self.last_login_at else None,
+        }
+        return data
 
 
 class Shot(db.Model):
     __tablename__ = 'shots'
     id = db.Column(db.Integer, primary_key=True)
-    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=False)
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
     name = db.Column(db.String(100), nullable=False)
     sequence = db.Column(db.Integer, nullable=False)
     materials = db.relationship('Material', backref='shot', lazy=True, cascade='all, delete-orphan')
@@ -67,32 +109,30 @@ class Shot(db.Model):
 class Material(db.Model):
     __tablename__ = 'materials'
     id = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
     shot_id = db.Column(db.Integer, db.ForeignKey('shots.id'), nullable=False)
     type = db.Column(db.String(20), nullable=False)
     original_name = db.Column(db.String(255))
-    file_path = db.Column(db.String(500), nullable=False)  # Original file
-    unified_path = db.Column(db.String(500))  # Transcoded unified format
+    file_path = db.Column(db.String(500), nullable=False)
+    unified_path = db.Column(db.String(500))
     thumbnail_path = db.Column(db.String(500), nullable=False)
     duration = db.Column(db.String(10))
     created_at = db.Column(db.DateTime, default=db.func.now())
 
 
 class Render(db.Model):
-    """Stores rendered video records for persistence"""
     __tablename__ = 'renders'
-    id = db.Column(db.String(100), primary_key=True)  # combo_id
-    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=False)
+    id = db.Column(db.String(100), primary_key=True)
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
     combo_index = db.Column(db.Integer, nullable=False)
-    material_ids = db.Column(db.Text, nullable=False)  # JSON array of material IDs
+    material_ids = db.Column(db.Text, nullable=False)
     tag = db.Column(db.String(50))
     duration = db.Column(db.String(10))
     duration_seconds = db.Column(db.Float)
     thumbnail = db.Column(db.String(500))
-    file_path = db.Column(db.String(500))  # Path to rendered video
-    status = db.Column(db.String(20), default='completed')  # completed, failed
+    file_path = db.Column(db.String(500))
+    status = db.Column(db.String(20), default='pending')
     created_at = db.Column(db.DateTime, default=db.func.now())
-    
-    project = db.relationship('Project', backref='renders', lazy=True)
 
 
 # Create tables
@@ -100,28 +140,27 @@ with app.app_context():
     db.create_all()
 
 
+# ==================== Helper Functions ====================
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 def get_quality_settings(quality):
-    """Get quality settings for transcoding - optimized for speed"""
     settings = {
-        'low': {'scale': '720:1280', 'crf': '23', 'preset': 'ultrafast'},    # Fastest
-        'medium': {'scale': '1080:1920', 'crf': '23', 'preset': 'superfast'}, # Fast, good quality
-        'high': {'scale': '1440:2560', 'crf': '22', 'preset': 'veryfast'},    # Balanced
-        'ultra': {'scale': '2160:3840', 'crf': '20', 'preset': 'faster'}     # High quality
+        'low': {'scale': '720:1280', 'crf': '23', 'preset': 'ultrafast'},
+        'medium': {'scale': '1080:1920', 'crf': '23', 'preset': 'superfast'},
+        'high': {'scale': '1440:2560', 'crf': '22', 'preset': 'veryfast'},
+        'ultra': {'scale': '2160:3840', 'crf': '20', 'preset': 'faster'}
     }
     return settings.get(quality, settings['medium'])
 
 
 def transcode_to_unified(input_path, output_path, quality='medium'):
-    """Transcode video/image to unified format (H.264, same resolution)"""
     settings = get_quality_settings(quality)
     ext = input_path.rsplit('.', 1)[1].lower()
     
     if ext in {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}:
-        # For images: create 3-second video
         cmd = [
             'ffmpeg', '-y',
             '-loop', '1',
@@ -130,13 +169,12 @@ def transcode_to_unified(input_path, output_path, quality='medium'):
             '-c:v', 'libx264',
             '-crf', settings['crf'],
             '-preset', settings['preset'],
-            '-t', '3',  # 3 seconds
+            '-t', '3',
             '-pix_fmt', 'yuv420p',
             '-movflags', '+faststart',
             output_path
         ]
     else:
-        # For videos: transcode to unified format
         cmd = [
             'ffmpeg', '-y',
             '-i', input_path,
@@ -158,7 +196,6 @@ def transcode_to_unified(input_path, output_path, quality='medium'):
 
 
 def generate_image_thumbnail(image_path, thumbnail_path):
-    """Generate thumbnail for image"""
     with Image.open(image_path) as img:
         if img.mode in ('RGBA', 'P'):
             img = img.convert('RGB')
@@ -171,7 +208,6 @@ def generate_image_thumbnail(image_path, thumbnail_path):
 
 
 def generate_video_thumbnail(video_path, thumbnail_path):
-    """Generate thumbnail for video (first frame)"""
     cap = cv2.VideoCapture(video_path)
     success, frame = cap.read()
     if success:
@@ -188,7 +224,6 @@ def generate_video_thumbnail(video_path, thumbnail_path):
 
 
 def get_video_duration(video_path):
-    """Get video duration in seconds"""
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
@@ -199,42 +234,34 @@ def get_video_duration(video_path):
 
 
 def format_duration(seconds):
-    """Format duration as MM:SS"""
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{minutes}:{secs:02d}"
 
 
 def fast_concat_videos(unified_files, output_path):
-    """Fast concat using -c copy (no re-encoding)"""
     if not unified_files:
         return False
     
-    # Check if all files have audio
     files_with_audio = []
     for filepath in unified_files:
-        # Check if file has audio stream
-        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', 
-               '-show_entries', 'stream=codec_type', '-of', 
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a',
+               '-show_entries', 'stream=codec_type', '-of',
                'default=noprint_wrappers=1:nokey=1', filepath]
         result = subprocess.run(cmd, capture_output=True, text=True)
         has_audio = 'audio' in result.stdout
         files_with_audio.append((filepath, has_audio))
     
-    # If any file lacks audio, we need to add silent audio or re-encode
     all_have_audio = all(has_audio for _, has_audio in files_with_audio)
     
-    # Create concat file list
     list_file = os.path.join(RENDERS_FOLDER, f"list_{uuid.uuid4().hex[:8]}.txt")
     with open(list_file, 'w') as f:
         for filepath, _ in files_with_audio:
-            # Use absolute path and escape properly
             abs_path = os.path.abspath(filepath)
             f.write(f"file '{abs_path}'\n")
     
     try:
         if all_have_audio:
-            # All files have audio, can use -c copy
             cmd = [
                 'ffmpeg', '-y',
                 '-f', 'concat',
@@ -245,10 +272,6 @@ def fast_concat_videos(unified_files, output_path):
                 output_path
             ]
         else:
-            # Some files lack audio, need to handle it
-            # Use anear=0 to add silent audio to files without audio, then concat with -c copy
-            
-            # First, process files to ensure all have audio
             processed_files = []
             temp_files = []
             
@@ -257,7 +280,6 @@ def fast_concat_videos(unified_files, output_path):
                     if has_audio:
                         processed_files.append(filepath)
                     else:
-                        # Add silent audio to files without audio
                         temp_output = os.path.join(RENDERS_FOLDER, f"temp_{uuid.uuid4().hex[:8]}_{i}.mp4")
                         temp_files.append(temp_output)
                         
@@ -278,15 +300,13 @@ def fast_concat_videos(unified_files, output_path):
                         if result.returncode == 0:
                             processed_files.append(temp_output)
                         else:
-                            processed_files.append(filepath)  # Fallback to original
+                            processed_files.append(filepath)
                 
-                # Create new concat list with processed files
                 with open(list_file, 'w') as f:
                     for filepath in processed_files:
                         abs_path = os.path.abspath(filepath)
                         f.write(f"file '{abs_path}'\n")
                 
-                # Now all files have audio, can use -c copy
                 cmd = [
                     'ffmpeg', '-y',
                     '-f', 'concat',
@@ -297,7 +317,6 @@ def fast_concat_videos(unified_files, output_path):
                     output_path
                 ]
             finally:
-                # Clean up temp files
                 for temp_file in temp_files:
                     if os.path.exists(temp_file):
                         os.remove(temp_file)
@@ -311,45 +330,308 @@ def fast_concat_videos(unified_files, output_path):
             os.remove(list_file)
 
 
-# APIs
-@app.route('/api/projects', methods=['POST'])
-def create_project():
-    """Create a new project"""
+# ==================== Auth Helper Functions ====================
+
+def validate_username(username):
+    """Validate username: 3-20 chars, alphanumeric and underscore"""
+    if not username:
+        return False, "用户名不能为空"
+    if len(username) < 3 or len(username) > 20:
+        return False, "用户名长度需在3-20个字符之间"
+    if not re.match(r'^[a-zA-Z0-9_]+$', username):
+        return False, "用户名只能包含字母、数字和下划线"
+    return True, None
+
+
+def validate_password(password):
+    """Validate password: at least 6 chars"""
+    if not password:
+        return False, "密码不能为空"
+    if len(password) < 6:
+        return False, "密码长度至少为6个字符"
+    return True, None
+
+
+def validate_email(email):
+    """Validate email format"""
+    if not email:
+        return False, "邮箱不能为空"
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(pattern, email):
+        return False, "邮箱格式不正确"
+    return True, None
+
+
+def validate_phone(phone):
+    """Validate phone number: Chinese mobile format"""
+    if not phone:
+        return False, "手机号不能为空"
+    pattern = r'^1[3-9]\d{9}$'
+    if not re.match(pattern, phone):
+        return False, "手机号格式不正确"
+    return True, None
+
+
+# ==================== User Auth APIs ====================
+
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    """Register a new user"""
     try:
         data = request.json or {}
-        project = Project(
-            name=data.get('name', '未命名项目'),
-            quality=data.get('quality', 'medium')
+        
+        # Get registration info
+        username = data.get('username', '').strip()
+        email = data.get('email', '').strip()
+        phone = data.get('phone', '').strip()
+        password = data.get('password', '')
+        nickname = data.get('nickname', '').strip()
+        
+        # Validate at least one of username/email/phone is provided
+        if not username and not email and not phone:
+            return jsonify({'error': '请提供用户名、邮箱或手机号'}), 400
+        
+        # Validate inputs
+        if username:
+            valid, error = validate_username(username)
+            if not valid:
+                return jsonify({'error': error}), 400
+            # Check if username exists
+            if User.query.filter_by(username=username).first():
+                return jsonify({'error': '用户名已被注册'}), 400
+        
+        if email:
+            valid, error = validate_email(email)
+            if not valid:
+                return jsonify({'error': error}), 400
+            # Check if email exists
+            if User.query.filter_by(email=email).first():
+                return jsonify({'error': '邮箱已被注册'}), 400
+        
+        if phone:
+            valid, error = validate_phone(phone)
+            if not valid:
+                return jsonify({'error': error}), 400
+            # Check if phone exists
+            if User.query.filter_by(phone=phone).first():
+                return jsonify({'error': '手机号已被注册'}), 400
+        
+        # Validate password
+        valid, error = validate_password(password)
+        if not valid:
+            return jsonify({'error': error}), 400
+        
+        # Create new user
+        user = User(
+            type='registered',
+            username=username or None,
+            email=email or None,
+            phone=phone or None,
+            password_hash=generate_password_hash(password),
+            nickname=nickname or username or '用户' + str(uuid.uuid4().hex[:6]),
+            is_active=True
         )
-        db.session.add(project)
+        
+        db.session.add(user)
         db.session.commit()
+        
         return jsonify({
-            'id': project.id,
-            'name': project.name,
-            'quality': project.quality,
-            'created_at': project.created_at.isoformat()
+            'message': '注册成功',
+            'user': user.to_dict()
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """Login user with username/email/phone + password"""
+    try:
+        data = request.json or {}
+        
+        account = data.get('account', '').strip()  # username/email/phone
+        password = data.get('password', '')
+        
+        if not account:
+            return jsonify({'error': '请输入用户名、邮箱或手机号'}), 400
+        if not password:
+            return jsonify({'error': '请输入密码'}), 400
+        
+        # Find user by username, email, or phone
+        user = None
+        if '@' in account:
+            user = User.query.filter_by(email=account).first()
+        elif account.isdigit():
+            user = User.query.filter_by(phone=account).first()
+        
+        if not user:
+            user = User.query.filter_by(username=account).first()
+        
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        if user.type != 'registered':
+            return jsonify({'error': '该账户不支持密码登录'}), 400
+        
+        if not user.is_active:
+            return jsonify({'error': '账户已被禁用'}), 403
+        
+        # Check password
+        if not user.password_hash or not check_password_hash(user.password_hash, password):
+            return jsonify({'error': '密码错误'}), 401
+        
+        # Update last login time
+        user.last_login_at = datetime.now()
+        db.session.commit()
+        
+        return jsonify({
+            'message': '登录成功',
+            'user': user.to_dict()
         })
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/projects/<int:project_id>', methods=['GET'])
-def get_project(project_id):
-    """Get project details"""
-    project = Project.query.get(project_id)
-    if not project:
-        return jsonify({'error': '项目不存在'}), 404
+@app.route('/api/auth/logout', methods=['POST'])
+def logout():
+    """Logout user (client-side should clear localStorage)"""
+    return jsonify({'message': '退出登录成功'})
+
+
+@app.route('/api/auth/change-password', methods=['POST'])
+def change_password():
+    """Change user password"""
+    try:
+        data = request.json or {}
+        user_id = data.get('user_id')
+        old_password = data.get('old_password', '')
+        new_password = data.get('new_password', '')
+        
+        if not user_id:
+            return jsonify({'error': '缺少用户ID'}), 400
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        if user.type != 'registered':
+            return jsonify({'error': '该账户不支持修改密码'}), 400
+        
+        # Verify old password
+        if not user.password_hash or not check_password_hash(user.password_hash, old_password):
+            return jsonify({'error': '原密码错误'}), 401
+        
+        # Validate new password
+        valid, error = validate_password(new_password)
+        if not valid:
+            return jsonify({'error': error}), 400
+        
+        # Update password
+        user.password_hash = generate_password_hash(new_password)
+        db.session.commit()
+        
+        return jsonify({'message': '密码修改成功'})
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auth/profile', methods=['GET'])
+def get_profile():
+    """Get user profile"""
+    try:
+        user_id = request.args.get('user_id')
+        if not user_id:
+            return jsonify({'error': '缺少用户ID'}), 400
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        return jsonify({
+            'user': user.to_dict()
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/auth/profile', methods=['PUT'])
+def update_profile():
+    """Update user profile"""
+    try:
+        data = request.json or {}
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({'error': '缺少用户ID'}), 400
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        # Update allowed fields
+        if 'nickname' in data:
+            nickname = data['nickname'].strip()
+            if nickname:
+                user.nickname = nickname[:50]
+        
+        if 'avatar' in data:
+            user.avatar = data['avatar']
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': '资料更新成功',
+            'user': user.to_dict()
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== User APIs (Anonymous) ====================
+
+@app.route('/api/users', methods=['POST'])
+def create_user():
+    """Create a new anonymous user"""
+    try:
+        user = User(type='anonymous')
+        db.session.add(user)
+        db.session.commit()
+        return jsonify({
+            'id': user.id,
+            'type': user.type,
+            'created_at': user.created_at.isoformat()
+        })
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users/<user_id>', methods=['GET'])
+def get_user(user_id):
+    """Get user details with shots and materials"""
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': '用户不存在'}), 404
     
     try:
         shots_data = []
-        for shot in sorted(project.shots, key=lambda x: x.sequence):
+        for shot in sorted(user.shots, key=lambda x: x.sequence):
             materials_data = [{
                 'id': mat.id,
                 'type': mat.type,
                 'url': f'/uploads/{os.path.basename(mat.file_path)}',
                 'thumbnail': f'/uploads/thumbnails/{os.path.basename(mat.thumbnail_path)}',
                 'duration': mat.duration,
-                'name': mat.original_name
+                'name': mat.original_name,
+                'transcode_status': 'completed' if mat.unified_path else 'pending'
             } for mat in shot.materials]
             
             shots_data.append({
@@ -360,27 +642,73 @@ def get_project(project_id):
             })
         
         return jsonify({
-            'id': project.id,
-            'name': project.name,
-            'quality': project.quality,
-            'created_at': project.created_at.isoformat(),
+            'id': user.id,
+            'type': user.type,
+            'nickname': user.nickname,
+            'created_at': user.created_at.isoformat(),
             'shots': shots_data
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/projects/<int:project_id>/shots', methods=['POST'])
-def create_shot(project_id):
-    """Create a new shot"""
+# ==================== Shots APIs ====================
+
+@app.route('/api/shots', methods=['GET'])
+def get_shots():
+    """Get all shots for a user"""
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({'error': '缺少user_id参数'}), 400
+    
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': '用户不存在'}), 404
+    
     try:
-        project = Project.query.get_or_404(project_id)
-        data = request.json
+        shots_data = []
+        for shot in sorted(user.shots, key=lambda x: x.sequence):
+            materials_data = [{
+                'id': mat.id,
+                'type': mat.type,
+                'url': f'/uploads/{os.path.basename(mat.file_path)}',
+                'thumbnail': f'/uploads/thumbnails/{os.path.basename(mat.thumbnail_path)}',
+                'duration': mat.duration,
+                'name': mat.original_name,
+                'transcode_status': 'completed' if mat.unified_path else 'pending'
+            } for mat in shot.materials]
+            
+            shots_data.append({
+                'id': shot.id,
+                'name': shot.name,
+                'sequence': shot.sequence,
+                'materials': materials_data
+            })
         
+        return jsonify({'shots': shots_data})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/shots', methods=['POST'])
+def create_shot():
+    """Create a new shot for a user"""
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({'error': '缺少user_id'}), 400
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        shot_count = len(user.shots)
         shot = Shot(
-            project_id=project_id,
-            name=data.get('name', f'镜头{len(project.shots) + 1}'),
-            sequence=len(project.shots)
+            user_id=user_id,
+            name=data.get('name', f'镜头{shot_count + 1}'),
+            sequence=shot_count
         )
         db.session.add(shot)
         db.session.commit()
@@ -388,49 +716,34 @@ def create_shot(project_id):
         return jsonify({
             'id': shot.id,
             'name': shot.name,
-            'sequence': shot.sequence
+            'sequence': shot.sequence,
+            'materials': []
         })
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/shots/<int:shot_id>', methods=['DELETE'])
+def delete_shot(shot_id):
+    """Delete a shot and all its materials"""
+    try:
+        shot = Shot.query.get_or_404(shot_id)
+        
+        for material in shot.materials:
+            for path in [material.file_path, material.unified_path, material.thumbnail_path]:
+                if path and os.path.exists(path):
+                    os.remove(path)
+        
+        db.session.delete(shot)
+        db.session.commit()
+        
+        return jsonify({'message': '镜头已删除'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
-# Transcoding task management
-transcode_tasks = {}
-
-
-def async_transcode_task(task_id, material_id, input_path, output_path, quality):
-    """Background transcoding task"""
-    transcode_tasks[task_id] = {
-        'id': task_id,
-        'material_id': material_id,
-        'status': 'processing',
-        'progress': 0
-    }
-    
-    try:
-        transcode_tasks[task_id]['progress'] = 50
-        success = transcode_to_unified(input_path, output_path, quality)
-        
-        if success:
-            # Update database - need app context for thread
-            with app.app_context():
-                material = Material.query.get(material_id)
-                if material:
-                    material.unified_path = output_path
-                    db.session.commit()
-                    print(f"Transcode completed: {material_id} -> {output_path}")
-                else:
-                    print(f"Material not found: {material_id}")
-            transcode_tasks[task_id]['status'] = 'completed'
-            transcode_tasks[task_id]['progress'] = 100
-        else:
-            transcode_tasks[task_id]['status'] = 'failed'
-            print(f"Transcode failed: {material_id}")
-    except Exception as e:
-        transcode_tasks[task_id]['status'] = 'failed'
-        transcode_tasks[task_id]['error'] = str(e)
-        print(f"Transcode error: {material_id} - {str(e)}")
-
+# ==================== Upload API ====================
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -443,11 +756,19 @@ def upload_file():
         if file.filename == '':
             return jsonify({'error': '没有选择文件'}), 400
         
+        user_id = request.form.get('user_id')
         shot_id = request.form.get('shotId')
         quality = request.form.get('quality', 'medium')
         
+        if not user_id:
+            return jsonify({'error': '没有指定用户ID'}), 400
+        
         if not shot_id:
             return jsonify({'error': '没有指定镜头ID'}), 400
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
         
         try:
             shot_id = int(shot_id)
@@ -455,20 +776,18 @@ def upload_file():
             return jsonify({'error': '无效的镜头ID'}), 400
         
         shot = Shot.query.get(shot_id)
-        if not shot:
-            return jsonify({'error': '镜头不存在'}), 404
+        if not shot or shot.user_id != user_id:
+            return jsonify({'error': '镜头不存在或无权限'}), 404
         
         if not allowed_file(file.filename):
             return jsonify({'error': '不支持的文件类型'}), 400
         
-        # Save original file
         material_id = str(uuid.uuid4())
         ext = file.filename.rsplit('.', 1)[1].lower()
         filename = f"{material_id}.{ext}"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         file.save(filepath)
         
-        # Generate thumbnail (fast operation)
         thumbnail_filename = f"{material_id}_thumb.jpg"
         thumbnail_path = os.path.join(THUMBNAIL_FOLDER, thumbnail_filename)
         
@@ -481,25 +800,23 @@ def upload_file():
             generate_image_thumbnail(filepath, thumbnail_path)
             duration = '0:03'
         
-        # Prepare unified path
         unified_filename = f"{material_id}_unified.mp4"
         unified_path = os.path.join(UNIFIED_FOLDER, unified_filename)
         
-        # Save to database (without unified_path initially)
         material = Material(
             id=material_id,
+            user_id=user_id,
             shot_id=shot_id,
             type='video' if is_video else 'image',
             original_name=file.filename,
             file_path=filepath,
-            unified_path=None,  # Will be set after transcoding
+            unified_path=None,
             thumbnail_path=thumbnail_path,
             duration=duration
         )
         db.session.add(material)
         db.session.commit()
         
-        # Start async transcoding
         task_id = f"transcode_{material_id}"
         thread = threading.Thread(
             target=async_transcode_task,
@@ -520,30 +837,41 @@ def upload_file():
         })
         
     except Exception as e:
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 
-def cleanup_renders_with_material(project_id, material_id):
-    """Delete all renders that contain a specific material"""
+def async_transcode_task(task_id, material_id, input_path, output_path, quality):
+    """Background transcoding task"""
+    transcode_tasks[task_id] = {
+        'id': task_id,
+        'material_id': material_id,
+        'status': 'processing',
+        'progress': 0
+    }
+    
     try:
-        renders = Render.query.filter_by(project_id=project_id).all()
-        for render in renders:
-            try:
-                material_ids = json.loads(render.material_ids)
-                if material_id in material_ids:
-                    # Delete render file
-                    if render.file_path and os.path.exists(render.file_path):
-                        try:
-                            os.remove(render.file_path)
-                        except:
-                            pass
-                    # Delete DB record
-                    db.session.delete(render)
-            except:
-                continue
-        db.session.commit()
+        transcode_tasks[task_id]['progress'] = 50
+        success = transcode_to_unified(input_path, output_path, quality)
+        
+        if success:
+            with app.app_context():
+                material = Material.query.get(material_id)
+                if material:
+                    material.unified_path = output_path
+                    db.session.commit()
+                    print(f"Transcode completed: {material_id}")
+                else:
+                    print(f"Material not found: {material_id}")
+            transcode_tasks[task_id]['status'] = 'completed'
+            transcode_tasks[task_id]['progress'] = 100
+        else:
+            transcode_tasks[task_id]['status'] = 'failed'
+            print(f"Transcode failed: {material_id}")
     except Exception as e:
-        print(f"Error cleaning up renders: {e}")
+        transcode_tasks[task_id]['status'] = 'failed'
+        transcode_tasks[task_id]['error'] = str(e)
+        print(f"Transcode error: {material_id} - {str(e)}")
 
 
 @app.route('/api/transcode/<task_id>/status', methods=['GET'])
@@ -560,139 +888,76 @@ def get_transcode_status(task_id):
     })
 
 
+# ==================== Materials APIs ====================
+
 @app.route('/api/materials/<material_id>', methods=['DELETE'])
 def delete_material(material_id):
     """Delete a material and cleanup related renders"""
     try:
         material = Material.query.get_or_404(material_id)
-        shot_id = material.shot_id
-        shot = Shot.query.get(shot_id)
-        project_id = shot.project_id if shot else None
-        
-        # Delete files with logging
-        print(f"Deleting material {material_id}:")
-        print(f"  file_path: {material.file_path}")
-        print(f"  unified_path: {material.unified_path}")
-        print(f"  thumbnail_path: {material.thumbnail_path}")
+        user_id = material.user_id
         
         for path in [material.file_path, material.unified_path, material.thumbnail_path]:
-            if path:
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                        print(f"  Deleted: {path}")
-                    except Exception as e:
-                        print(f"  Failed to delete {path}: {e}")
-                else:
-                    print(f"  Not found: {path}")
-            else:
-                print(f"  Path is None, skipping")
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception as e:
+                    print(f"Failed to delete {path}: {e}")
         
-        # Cleanup renders that contain this material
-        if project_id:
-            cleanup_renders_with_material(project_id, material_id)
+        cleanup_renders_with_material(user_id, material_id)
         
         db.session.delete(material)
         db.session.commit()
         
         return jsonify({'message': '素材已删除'})
     except Exception as e:
-        print(f"Error deleting material {material_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/shots/<int:shot_id>', methods=['DELETE'])
-def delete_shot(shot_id):
-    """Delete a shot and all its materials"""
+def cleanup_renders_with_material(user_id, material_id):
+    """Delete all renders that contain a specific material"""
     try:
-        shot = Shot.query.get_or_404(shot_id)
-        
-        # Delete all material files first
-        for material in shot.materials:
-            for path in [material.file_path, material.unified_path, material.thumbnail_path]:
-                if path and os.path.exists(path):
-                    os.remove(path)
-        
-        db.session.delete(shot)
+        renders = Render.query.filter_by(user_id=user_id).all()
+        for render in renders:
+            try:
+                material_ids = json.loads(render.material_ids)
+                if material_id in material_ids:
+                    if render.file_path and os.path.exists(render.file_path):
+                        try:
+                            os.remove(render.file_path)
+                        except:
+                            pass
+                    db.session.delete(render)
+            except:
+                continue
         db.session.commit()
-        
-        return jsonify({'message': '镜头已删除'})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        print(f"Error cleaning up renders: {e}")
 
 
-def clear_project_renders(project_id):
-    """Clear all renders for a project - delete files and DB records"""
+# ==================== Generate APIs ====================
+
+@app.route('/api/generate', methods=['POST'])
+def generate_combinations():
+    """Generate combinations metadata for a user"""
     try:
-        # Delete all render files for this project (combo_{project_id}_*.mp4)
-        prefix = f"combo_{project_id}_"
-        for filename in os.listdir(RENDERS_FOLDER):
-            if filename.startswith(prefix) or filename.startswith(f"render_{prefix}"):
-                filepath = os.path.join(RENDERS_FOLDER, filename)
-                try:
-                    if os.path.isfile(filepath):
-                        os.remove(filepath)
-                        print(f"Deleted old render: {filename}")
-                except Exception as e:
-                    print(f"Failed to delete {filename}: {e}")
+        data = request.json
+        user_id = data.get('user_id')
         
-        # Delete DB records
-        Render.query.filter_by(project_id=project_id).delete()
-        db.session.commit()
-        print(f"Cleared all renders for project {project_id}")
-    except Exception as e:
-        print(f"Error clearing renders: {e}")
-
-
-# Task management for on-demand fast concat
-render_tasks = {}
-
-
-def fast_concat_task(task_id, combo_id, unified_files, output_path):
-    """Fast concat using -c copy (no re-encoding) - seconds level"""
-    render_tasks[task_id] = {
-        'id': task_id,
-        'combo_id': combo_id,
-        'status': 'processing',
-        'progress': 0,
-        'output_path': output_path
-    }
-    
-    try:
-        render_tasks[task_id]['progress'] = 50
+        if not user_id:
+            return jsonify({'error': '缺少user_id'}), 400
         
-        # Use existing fast_concat_videos function
-        success = fast_concat_videos(unified_files, output_path)
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
         
-        if success and os.path.exists(output_path):
-            render_tasks[task_id]['progress'] = 100
-            render_tasks[task_id]['status'] = 'completed'
-            render_tasks[task_id]['video_url'] = f'/renders/{os.path.basename(output_path)}'
-        else:
-            render_tasks[task_id]['status'] = 'failed'
-            render_tasks[task_id]['error'] = 'Concat failed'
-            
-    except Exception as e:
-        render_tasks[task_id]['status'] = 'failed'
-        render_tasks[task_id]['error'] = str(e)
-
-
-@app.route('/api/projects/<int:project_id>/generate', methods=['POST'])
-def generate_combinations(project_id):
-    """Generate combinations metadata only - no pre-rendering (on-demand strategy)"""
-    try:
-        project = Project.query.get_or_404(project_id)
+        clear_user_renders(user_id)
         
-        # Clear old renders first (both DB and files)
-        clear_project_renders(project_id)
-        
-        # Get shots with materials that have unified files
-        shots = sorted([s for s in project.shots if s.materials], key=lambda x: x.sequence)
+        shots = sorted([s for s in user.shots if s.materials], key=lambda x: x.sequence)
         
         if not shots:
             return jsonify({'error': '没有镜头包含素材'}), 400
         
-        # Generate combinations metadata only (use only transcoded materials)
         material_lists = []
         for shot in shots:
             mat_dicts = [{
@@ -707,31 +972,30 @@ def generate_combinations(project_id):
         
         all_combos = list(product(*material_lists))
         total_possible = len(all_combos)
-        limit = min(total_possible, 1000)  # Increased limit since we don't pre-render
+        limit = min(total_possible, 1000)
         
         combinations = []
         for combo_index, combo in enumerate(all_combos[:limit]):
-            combo_id = f"combo_{project_id}_{combo_index}"
+            combo_id = f"combo_{user_id}_{combo_index}"
             
             total_duration = sum([
-                3 if m['type'] == 'image' else 
-                get_video_duration(m['unified_path']) 
+                3 if m['type'] == 'image' else
+                get_video_duration(m['unified_path'])
                 for m in combo
             ])
             
-            # Save metadata to database (no video file yet)
             material_ids = json.dumps([m['id'] for m in combo])
             render = Render(
                 id=combo_id,
-                project_id=project_id,
+                user_id=user_id,
                 combo_index=combo_index,
                 material_ids=material_ids,
                 tag=calculate_uniqueness_tag(combo),
                 duration=format_duration(total_duration),
                 duration_seconds=total_duration,
                 thumbnail=combo[0]['thumbnail'] if combo else '',
-                file_path=None,  # Not rendered yet
-                status='pending'  # Mark as pending
+                file_path=None,
+                status='pending'
             )
             db.session.add(render)
             
@@ -743,7 +1007,7 @@ def generate_combinations(project_id):
                 'duration': format_duration(total_duration),
                 'duration_seconds': total_duration,
                 'tag': calculate_uniqueness_tag(combo),
-                'preview_status': 'pending',  # Not rendered yet
+                'preview_status': 'pending',
                 'preview_url': None
             }
             combinations.append(combo_data)
@@ -771,46 +1035,64 @@ def calculate_uniqueness_tag(materials):
         return '普通'
 
 
-@app.route('/api/projects/<int:project_id>/renders', methods=['GET'])
-def get_project_renders(project_id):
-    """Get all rendered videos for a project (persistent storage)"""
+def clear_user_renders(user_id):
+    """Clear all renders for a user"""
     try:
-        project = Project.query.get_or_404(project_id)
+        renders = Render.query.filter_by(user_id=user_id).all()
+        for render in renders:
+            if render.file_path and os.path.exists(render.file_path):
+                try:
+                    os.remove(render.file_path)
+                except:
+                    pass
         
-        # Get all renders from database
-        renders = Render.query.filter_by(project_id=project_id).order_by(Render.combo_index).all()
+        Render.query.filter_by(user_id=user_id).delete()
+        db.session.commit()
+        print(f"Cleared all renders for user {user_id}")
+    except Exception as e:
+        print(f"Error clearing renders: {e}")
+
+
+# ==================== Renders APIs ====================
+
+@app.route('/api/renders', methods=['GET'])
+def get_renders():
+    """Get all renders for a user"""
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({'error': '缺少user_id参数'}), 400
+    
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': '用户不存在'}), 404
+    
+    try:
+        renders = Render.query.filter_by(user_id=user_id).order_by(Render.combo_index).all()
         
         if not renders:
             return jsonify({'combinations': []})
         
-        # Build response
         combinations = []
         for render in renders:
-            # Check if file still exists
             file_exists = render.file_path and os.path.exists(render.file_path)
             
-            # Parse material IDs
             try:
                 material_ids = json.loads(render.material_ids)
             except:
                 material_ids = []
             
-            # Get material details from current project state
             materials_data = []
             for mat_id in material_ids:
-                # Find material in current project
-                for shot in project.shots:
-                    for mat in shot.materials:
-                        if mat.id == mat_id:
-                            materials_data.append({
-                                'id': mat.id,
-                                'type': mat.type,
-                                'url': f'/uploads/{os.path.basename(mat.file_path)}',
-                                'thumbnail': f'/uploads/thumbnails/{os.path.basename(mat.thumbnail_path)}',
-                                'duration': mat.duration,
-                                'name': mat.original_name
-                            })
-                            break
+                material = Material.query.get(mat_id)
+                if material and material.user_id == user_id:
+                    materials_data.append({
+                        'id': material.id,
+                        'type': material.type,
+                        'url': f'/uploads/{os.path.basename(material.file_path)}',
+                        'thumbnail': f'/uploads/thumbnails/{os.path.basename(material.thumbnail_path)}',
+                        'duration': material.duration,
+                        'name': material.original_name
+                    })
             
             combo_data = {
                 'id': render.id,
@@ -825,9 +1107,7 @@ def get_project_renders(project_id):
             }
             combinations.append(combo_data)
         
-        return jsonify({
-            'combinations': combinations
-        })
+        return jsonify({'combinations': combinations})
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -841,20 +1121,19 @@ def render_combination_video(combo_id):
         if len(parts) < 3 or parts[0] != 'combo':
             return jsonify({'error': '无效的组合ID'}), 400
         
-        project_id = int(parts[1])
-        project = Project.query.get_or_404(project_id)
+        user_id = parts[1]
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
         
-        # Get render record
         render = Render.query.get(combo_id)
-        if not render:
+        if not render or render.user_id != user_id:
             return jsonify({'error': '组合不存在'}), 404
         
-        # Check if already rendered
         output_filename = f"render_{combo_id}.mp4"
         output_path = os.path.join(RENDERS_FOLDER, output_filename)
         
         if os.path.exists(output_path):
-            # Update DB record
             render.file_path = output_path
             render.status = 'completed'
             db.session.commit()
@@ -864,7 +1143,6 @@ def render_combination_video(combo_id):
                 'video_url': f'/renders/{output_filename}'
             })
         
-        # Check if already processing
         for task_id, task in render_tasks.items():
             if task.get('combo_id') == combo_id and task['status'] == 'processing':
                 return jsonify({
@@ -873,19 +1151,17 @@ def render_combination_video(combo_id):
                     'progress': task.get('progress', 0)
                 })
         
-        # Get material files
         material_ids = json.loads(render.material_ids)
         material_files = []
         
         for mat_id in material_ids:
             material = Material.query.get(mat_id)
-            if material and material.unified_path and os.path.exists(material.unified_path):
+            if material and material.user_id == user_id and material.unified_path and os.path.exists(material.unified_path):
                 material_files.append(material.unified_path)
         
         if not material_files:
             return jsonify({'error': '素材文件不存在'}), 404
         
-        # Start background fast concat (seconds level with -c copy)
         task_id = f"task_{uuid.uuid4().hex[:8]}"
         thread = threading.Thread(
             target=fast_concat_task,
@@ -904,210 +1180,31 @@ def render_combination_video(combo_id):
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/projects/<int:project_id>/previews/status', methods=['GET'])
-def get_preview_status(project_id):
-    """Get preview generation status for all combinations"""
-    try:
-        project = Project.query.get_or_404(project_id)
-        
-        # Get all renders from database
-        renders = Render.query.filter_by(project_id=project_id).order_by(Render.combo_index).all()
-        
-        statuses = []
-        for render in renders:
-            # Check if file exists
-            file_exists = render.file_path and os.path.exists(render.file_path)
-            
-            # Check if processing
-            task_status = None
-            for task_id, task in render_tasks.items():
-                if task.get('combo_id') == render.id:
-                    task_status = task
-                    break
-            
-            if task_status and task_status['status'] == 'processing':
-                status = 'processing'
-            elif file_exists:
-                status = 'completed'
-            else:
-                status = 'pending'
-            
-            statuses.append({
-                'combo_id': render.id,
-                'status': status,
-                'progress': task_status.get('progress', 0) if task_status else (100 if file_exists else 0),
-                'preview_url': f'/renders/{os.path.basename(render.file_path)}' if file_exists else None
-            })
-        
-        return jsonify({
-            'total': len(statuses),
-            'completed': sum(1 for s in statuses if s['status'] == 'completed'),
-            'processing': sum(1 for s in statuses if s['status'] == 'processing'),
-            'statuses': statuses
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/combinations/<combo_id>/download', methods=['POST'])
-def download_combination(combo_id):
-    """Download video - supports both redirect and proxy modes"""
-    try:
-        parts = combo_id.split('_')
-        if len(parts) < 3 or parts[0] != 'combo':
-            return jsonify({'error': '无效的组合ID'}), 400
-        
-        # Check if preview video already exists
-        output_filename = f"render_{combo_id}.mp4"
-        output_path = os.path.join(RENDERS_FOLDER, output_filename)
-        
-        if not os.path.exists(output_path):
-            return jsonify({
-                'status': 'failed',
-                'error': '视频文件不存在，请重新生成'
-            }), 404
-        
-        # Check download mode from request
-        data = request.json or {}
-        download_mode = data.get('mode', 'proxy')  # 'proxy' or 'redirect'
-        
-        if download_mode == 'redirect':
-            # Production mode: return URL for direct download
-            # Client will handle the download (suitable for OSS/CDN)
-            return jsonify({
-                'status': 'completed',
-                'video_url': f'/renders/{output_filename}',
-                'download_url': f'/api/download/file?path={output_filename}&name=mixcut_{combo_id}.mp4',
-                'mode': 'redirect'
-            })
-        else:
-            # Development mode: return URL for proxy download (Blob)
-            return jsonify({
-                'status': 'completed',
-                'video_url': f'/renders/{output_filename}',
-                'mode': 'proxy'
-            })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/download/file', methods=['GET'])
-def download_file():
-    """Direct file download with proper headers (production mode)"""
-    try:
-        file_path = request.args.get('path')
-        download_name = request.args.get('name', 'video.mp4')
-        
-        if not file_path:
-            return jsonify({'error': '没有指定文件路径'}), 400
-        
-        # Security: ensure path is within renders folder
-        full_path = os.path.join(RENDERS_FOLDER, os.path.basename(file_path))
-        
-        if not os.path.exists(full_path):
-            return jsonify({'error': '文件不存在'}), 404
-        
-        # Send file with download headers
-        return send_from_directory(
-            RENDERS_FOLDER,
-            os.path.basename(file_path),
-            as_attachment=True,
-            download_name=download_name
-        )
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-def render_download_task(task_id, combo, quality):
-    """Background task to render high quality download video"""
-    task = render_tasks[task_id]
+def fast_concat_task(task_id, combo_id, unified_files, output_path):
+    """Fast concat using -c copy"""
+    render_tasks[task_id] = {
+        'id': task_id,
+        'combo_id': combo_id,
+        'status': 'processing',
+        'progress': 0,
+        'output_path': output_path
+    }
     
     try:
-        # Quality settings
-        quality_settings = {
-            'low': {'scale': '720:1280', 'crf': '23', 'preset': 'veryfast'},
-            'medium': {'scale': '1080:1920', 'crf': '20', 'preset': 'fast'},
-            'high': {'scale': '1440:2560', 'crf': '18', 'preset': 'medium'},
-            'ultra': {'scale': '2160:3840', 'crf': '15', 'preset': 'slow'}
-        }
-        settings = quality_settings.get(quality, quality_settings['medium'])
+        render_tasks[task_id]['progress'] = 50
+        success = fast_concat_videos(unified_files, output_path)
         
-        # Get material files
-        material_files = []
-        for m in combo:
-            if m['unified_path'] and os.path.exists(m['unified_path']):
-                material_files.append(m['unified_path'])
-            elif m['file_path'] and os.path.exists(m['file_path']):
-                material_files.append(m['file_path'])
-        
-        if not material_files:
-            raise Exception('没有找到素材文件')
-        
-        task['progress'] = 10
-        
-        # Output path
-        output_filename = f"download_{task_id}.mp4"
-        output_path = os.path.join(RENDERS_FOLDER, output_filename)
-        
-        # Build FFmpeg command
-        inputs = []
-        filter_parts = []
-        
-        for i, filepath in enumerate(material_files):
-            inputs.extend(['-i', filepath])
-            ext = filepath.rsplit('.', 1)[1].lower()
-            
-            if ext in {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}:
-                # Images: loop for 3 seconds
-                filter_parts.append(f'[{i}:v]loop=loop=90:size=1:start=0,scale={settings["scale"]}:force_original_aspect_ratio=decrease,pad={settings["scale"]}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,fps=30[v{i}];')
-                filter_parts.append(f'[v{i}]anullsrc=channel_layout=stereo:sample_rate=44100[a{i}];')
-            else:
-                # Videos
-                filter_parts.append(f'[{i}:v]scale={settings["scale"]}:force_original_aspect_ratio=decrease,pad={settings["scale"]}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,fps=30[v{i}];')
-                filter_parts.append(f'[{i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{i}];')
-        
-        # Concat filter
-        concat_v = ''.join([f'[v{i}]' for i in range(len(material_files))])
-        concat_a = ''.join([f'[a{i}]' for i in range(len(material_files))])
-        filter_complex = ''.join(filter_parts)
-        filter_complex += f'{concat_v}concat=n={len(material_files)}:v=1:a=0[outv];'
-        filter_complex += f'{concat_a}concat=n={len(material_files)}:v=0:a=1[outa]'
-        
-        cmd = [
-            'ffmpeg', '-y',
-            *inputs,
-            '-filter_complex', filter_complex,
-            '-map', '[outv]',
-            '-map', '[outa]',
-            '-c:v', 'libx264',
-            '-crf', settings['crf'],
-            '-preset', settings['preset'],
-            '-c:a', 'aac',
-            '-b:a', '128k',
-            '-movflags', '+faststart',
-            '-pix_fmt', 'yuv420p',
-            '-r', '30',
-            output_path
-        ]
-        
-        task['progress'] = 30
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0 and os.path.exists(output_path):
-            task['progress'] = 100
-            task['status'] = 'completed'
-            task['output_path'] = output_path
-            task['video_url'] = f'/renders/{output_filename}'
+        if success and os.path.exists(output_path):
+            render_tasks[task_id]['progress'] = 100
+            render_tasks[task_id]['status'] = 'completed'
+            render_tasks[task_id]['video_url'] = f'/renders/{os.path.basename(output_path)}'
         else:
-            raise Exception(f'FFmpeg error: {result.stderr}')
+            render_tasks[task_id]['status'] = 'failed'
+            render_tasks[task_id]['error'] = 'Concat failed'
             
     except Exception as e:
-        task['status'] = 'failed'
-        task['error'] = str(e)
+        render_tasks[task_id]['status'] = 'failed'
+        render_tasks[task_id]['error'] = str(e)
 
 
 @app.route('/api/tasks/<task_id>/status', methods=['GET'])
@@ -1131,7 +1228,72 @@ def get_task_status(task_id):
     return jsonify(response)
 
 
-# Static file serving
+@app.route('/api/combinations/<combo_id>/download', methods=['POST'])
+def download_combination(combo_id):
+    """Download video"""
+    try:
+        parts = combo_id.split('_')
+        if len(parts) < 3 or parts[0] != 'combo':
+            return jsonify({'error': '无效的组合ID'}), 400
+        
+        output_filename = f"render_{combo_id}.mp4"
+        output_path = os.path.join(RENDERS_FOLDER, output_filename)
+        
+        if not os.path.exists(output_path):
+            return jsonify({
+                'status': 'failed',
+                'error': '视频文件不存在，请重新生成'
+            }), 404
+        
+        data = request.json or {}
+        download_mode = data.get('mode', 'proxy')
+        
+        if download_mode == 'redirect':
+            return jsonify({
+                'status': 'completed',
+                'video_url': f'/renders/{output_filename}',
+                'download_url': f'/api/download/file?path={output_filename}&name=mixcut_{combo_id}.mp4',
+                'mode': 'redirect'
+            })
+        else:
+            return jsonify({
+                'status': 'completed',
+                'video_url': f'/renders/{output_filename}',
+                'mode': 'proxy'
+            })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/download/file', methods=['GET'])
+def download_file():
+    """Direct file download"""
+    try:
+        file_path = request.args.get('path')
+        download_name = request.args.get('name', 'video.mp4')
+        
+        if not file_path:
+            return jsonify({'error': '没有指定文件路径'}), 400
+        
+        full_path = os.path.join(RENDERS_FOLDER, os.path.basename(file_path))
+        
+        if not os.path.exists(full_path):
+            return jsonify({'error': '文件不存在'}), 404
+        
+        return send_from_directory(
+            RENDERS_FOLDER,
+            os.path.basename(file_path),
+            as_attachment=True,
+            download_name=download_name
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== Static Files ====================
+
 @app.route('/uploads/<path:filename>')
 def serve_upload(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
@@ -1147,8 +1309,9 @@ def serve_render(filename):
     return send_from_directory(RENDERS_FOLDER, filename)
 
 
+# ==================== Cleanup ====================
+
 def cleanup_old_renders(max_age_hours=24):
-    """Cleanup render files older than specified hours"""
     try:
         current_time = time.time()
         max_age_seconds = max_age_hours * 3600
@@ -1172,10 +1335,9 @@ def cleanup_old_renders(max_age_hours=24):
 
 
 def start_cleanup_scheduler():
-    """Start background thread to cleanup old renders periodically"""
     def cleanup_loop():
         while True:
-            time.sleep(3600)  # Run every hour
+            time.sleep(3600)
             cleanup_old_renders(max_age_hours=24)
     
     cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
@@ -1183,6 +1345,5 @@ def start_cleanup_scheduler():
 
 
 if __name__ == '__main__':
-    # Start cleanup scheduler
     start_cleanup_scheduler()
     app.run(host='0.0.0.0', port=3002, debug=True)

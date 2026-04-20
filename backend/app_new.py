@@ -2,43 +2,39 @@
 """
 MixCut Backend - Modular Architecture
 =====================================
-This is the modular version of the backend.
+This is the new modular entry point. The original app.py is kept for reference.
 
 Project Structure:
-├── app.py                  # Original monolithic version (kept for reference)
-├── app_modular.py          # This file - modular entry point
-├── config.py               # Configuration settings
-├── extensions.py           # Flask extensions (db, task management)
-├── models.py               # Database models
-├── utils/                  # Utility functions
+├── app_new.py          # This file - main entry point
+├── config.py           # Configuration settings
+├── extensions.py       # Flask extensions (db, etc.)
+├── models.py           # Database models
+├── utils/              # Utility functions
 │   ├── __init__.py
-│   ├── validators.py       # Input validation
-│   ├── video.py            # Video processing
-│   └── helpers.py          # Helper functions
-├── services/               # Business logic layer
+│   ├── validators.py   # Input validation
+│   ├── video.py        # Video processing
+│   └── helpers.py      # General helper functions
+├── services/           # Business logic layer
 │   ├── __init__.py
 │   ├── user_service.py
 │   ├── shot_service.py
 │   ├── material_service.py
 │   └── render_service.py
-└── routes/                 # API routes (blueprints)
+└── routes/             # API routes (blueprints)
     ├── __init__.py
-    ├── auth.py             # Authentication
-    ├── users.py            # User management
-    ├── shots.py            # Shot management
-    ├── materials.py        # Material management
-    ├── upload.py           # File upload
-    ├── generate.py         # Video generation
-    ├── renders.py          # Render results
-    └── static.py           # Static files
+    ├── auth.py         # Authentication
+    ├── users.py        # User management
+    ├── shots.py        # Shot management
+    ├── materials.py    # Material management
+    ├── upload.py       # File upload
+    ├── generate.py     # Video generation
+    ├── renders.py      # Render results
+    └── static.py       # Static files
 
-Usage:
-    python app_modular.py
-
-To switch from original app.py:
-    1. Backup: mv app.py app_original.py
-    2. Switch: mv app_modular.py app.py
-    3. Run: python app.py
+To use this new structure:
+1. Move app.py to app_old.py (backup)
+2. Rename this file to app.py
+3. Run: python app.py
 """
 
 import threading
@@ -55,12 +51,13 @@ from config import (
     ensure_directories
 )
 from extensions import db
+from websocket import socketio, init_websocket
 
 # Import models to ensure they are registered with SQLAlchemy
 from models import User, Shot, Material, Render
 
 # Import blueprints
-from routes import (
+from routes import ( 
     auth_bp,
     users_bp,
     shots_bp,
@@ -118,6 +115,7 @@ def create_app():
     
     # Initialize extensions
     db.init_app(app)
+    init_websocket(app)  # Initialize WebSocket
     
     # Ensure directories exist
     ensure_directories()
@@ -142,4 +140,5 @@ def create_app():
 if __name__ == '__main__':
     app = create_app()
     start_cleanup_scheduler()
-    app.run(host='0.0.0.0', port=3002, debug=True)
+    # Use socketio.run instead of app.run for WebSocket support
+    socketio.run(app, host='0.0.0.0', port=3002, debug=True, allow_unsafe_werkzeug=True)

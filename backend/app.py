@@ -412,18 +412,24 @@ def async_transcode_task(task_id, material_id, input_path, output_path, quality)
         success = transcode_to_unified(input_path, output_path, quality)
         
         if success:
-            # Update database
-            material = Material.query.get(material_id)
-            if material:
-                material.unified_path = output_path
-                db.session.commit()
+            # Update database - need app context for thread
+            with app.app_context():
+                material = Material.query.get(material_id)
+                if material:
+                    material.unified_path = output_path
+                    db.session.commit()
+                    print(f"Transcode completed: {material_id} -> {output_path}")
+                else:
+                    print(f"Material not found: {material_id}")
             transcode_tasks[task_id]['status'] = 'completed'
             transcode_tasks[task_id]['progress'] = 100
         else:
             transcode_tasks[task_id]['status'] = 'failed'
+            print(f"Transcode failed: {material_id}")
     except Exception as e:
         transcode_tasks[task_id]['status'] = 'failed'
         transcode_tasks[task_id]['error'] = str(e)
+        print(f"Transcode error: {material_id} - {str(e)}")
 
 
 @app.route('/api/upload', methods=['POST'])
@@ -563,10 +569,24 @@ def delete_material(material_id):
         shot = Shot.query.get(shot_id)
         project_id = shot.project_id if shot else None
         
-        # Delete files
+        # Delete files with logging
+        print(f"Deleting material {material_id}:")
+        print(f"  file_path: {material.file_path}")
+        print(f"  unified_path: {material.unified_path}")
+        print(f"  thumbnail_path: {material.thumbnail_path}")
+        
         for path in [material.file_path, material.unified_path, material.thumbnail_path]:
-            if path and os.path.exists(path):
-                os.remove(path)
+            if path:
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                        print(f"  Deleted: {path}")
+                    except Exception as e:
+                        print(f"  Failed to delete {path}: {e}")
+                else:
+                    print(f"  Not found: {path}")
+            else:
+                print(f"  Path is None, skipping")
         
         # Cleanup renders that contain this material
         if project_id:
@@ -577,6 +597,7 @@ def delete_material(material_id):
         
         return jsonify({'message': '素材已删除'})
     except Exception as e:
+        print(f"Error deleting material {material_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
 

@@ -230,7 +230,8 @@ export default function App() {
       
       if (response.ok) {
         const shot = await response.json();
-        setShots([...shots, shot]);
+        // Ensure new shot has materials array to prevent white screen
+        setShots([...shots, { ...shot, materials: [] }]);
       }
     } catch (e) {
       console.error('Failed to add shot:', e);

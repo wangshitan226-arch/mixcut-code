@@ -241,7 +241,16 @@ export default function EditScreen({
                 )}
               </button>
               {(shot.materials || []).map((material) => (
-                <div key={material.id} className="w-20 h-28 shrink-0 rounded-lg overflow-hidden relative group bg-gray-200">
+                <div 
+                  key={material.id} 
+                  className="w-20 h-28 shrink-0 rounded-lg overflow-hidden relative group bg-gray-200"
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    if (confirm('确定要删除这个素材吗？')) {
+                      handleDeleteMaterial(shot.id, material.id);
+                    }
+                  }}
+                >
                   <img 
                     src={`${API_BASE_URL}${material.thumbnail}`} 
                     alt={material.name} 
@@ -258,15 +267,15 @@ export default function EditScreen({
                       {material.duration}
                     </div>
                   )}
-                  {/* Delete button on hover */}
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                    <button 
-                      onClick={() => handleDeleteMaterial(shot.id, material.id)}
-                      className="p-1.5 bg-red-500 text-white rounded-full hover:bg-red-600 transition-colors"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
+                  {/* Delete button - always visible on mobile, hover on desktop */}
+                  <button 
+                    onClick={() => handleDeleteMaterial(shot.id, material.id)}
+                    className="absolute top-1 right-1 p-1 bg-red-500 text-white rounded-full opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-md"
+                    style={{ zIndex: 10 }}
+                    aria-label="删除素材"
+                  >
+                    <Trash2 size={10} />
+                  </button>
                 </div>
               ))}
             </div>

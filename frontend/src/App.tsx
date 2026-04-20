@@ -82,12 +82,14 @@ export default function App() {
             setShots(project.shots);
             return;
           } else {
-            // Project not found, clear localStorage
+            // Project not found, clear localStorage and continue to create new
             localStorage.removeItem('mixcut_project_id');
+            // Continue to create new project below
           }
         } catch (e) {
           console.log('Failed to fetch existing project');
           localStorage.removeItem('mixcut_project_id');
+          // Continue to create new project below
         }
       }
       

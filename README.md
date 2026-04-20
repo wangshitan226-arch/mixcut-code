@@ -102,7 +102,22 @@ npm run dev
 ```
 mixcut/
 ├── backend/              # 后端代码
-│   ├── app.py           # 主应用
+│   ├── app.py           # 主应用（当前使用）
+│   ├── config.py        # 配置文件（模块化架构）
+│   ├── models.py        # 数据库模型（模块化架构）
+│   ├── utils/           # 工具函数（模块化架构）
+│   │   ├── __init__.py
+│   │   ├── video_utils.py
+│   │   └── file_utils.py
+│   ├── routes/          # 路由蓝图（模块化架构）
+│   │   ├── __init__.py
+│   │   ├── projects.py
+│   │   ├── shots.py
+│   │   ├── materials.py
+│   │   ├── upload.py
+│   │   ├── render.py
+│   │   └── download.py
+│   ├── app_modular.py   # 模块化入口（备用）
 │   ├── requirements.txt # Python依赖
 │   ├── uploads/         # 上传的素材
 │   ├── unified/         # 统一格式转码后的素材
@@ -118,6 +133,34 @@ mixcut/
 └── docs/                # 文档
     └── architecture.md  # 架构设计
 ```
+
+## 架构说明
+
+### 当前架构
+- **主入口**: `backend/app.py`（所有路由在此文件中）
+- **数据库模型**: 内嵌在 `app.py` 中
+- **工具函数**: 内嵌在 `app.py` 中
+
+### 模块化架构（备用）
+已创建模块化文件结构，为未来扩展做准备：
+- `config.py` - 集中管理所有配置
+- `models.py` - 数据库模型独立
+- `utils/` - 工具函数包
+- `routes/` - 路由蓝图（每个模块独立文件）
+- `app_modular.py` - 模块化入口
+
+### 如何添加新模块
+
+在现有 `app.py` 中添加新路由：
+
+```python
+# 在 app.py 中添加新的路由函数
+@app.route('/api/new-feature', methods=['GET'])
+def new_feature():
+    return jsonify({'message': '新功能'})
+```
+
+所有新功能都可以直接添加到 `app.py` 中，无需修改其他文件。
 
 ## 核心实现
 

@@ -53,58 +53,65 @@ def is_material_ready(mat):
     return False, 'pending'
 
 
-def generate_combinations_async(user_id, material_lists, shots_data, total_possible):
+def generate_combinations_async(user_id, material_lists, shots_data, total_possible, app):
     """异步生成组合详情 - 后台计算时长并更新数据库"""
     def async_task():
-        try:
-            print(f"[Async Generate] Starting for user {user_id}, total combos: {total_possible}")
-            start_time = time.time()
-            
-            all_combos = list(product(*material_lists))
-            limit = min(total_possible, 1000)
-            
-            # 批量获取或计算时长
-            duration_cache = {}
-            
-            for combo_index, combo in enumerate(all_combos[:limit]):
-                combo_id = f"combo_{user_id}_{combo_index}"
+        # 使用 app_context 确保数据库操作正常
+        with app.app_context():
+            try:
+                print(f"[Async Generate] Starting for user {user_id}, total combos: {total_possible}")
+                start_time = time.time()
                 
-                # 计算总时长（使用缓存）
-                total_duration = 0
-                for m in combo:
-                    mat_id = m['id']
-                    if mat_id not in duration_cache:
-                        # 优先使用数据库中的duration_seconds
-                        if m.get('duration_seconds'):
-                            duration_cache[mat_id] = m['duration_seconds']
-                        elif m['type'] == 'image':
-                            duration_cache[mat_id] = 3.0
-                        else:
-                            #  fallback：从文件读取（应该很少发生）
-                            from utils import get_video_duration
-                            duration_cache[mat_id] = get_video_duration(m['unified_path'])
-                    total_duration += duration_cache[mat_id]
+                all_combos = list(product(*material_lists))
+                limit = min(total_possible, 1000)
                 
-                # 更新数据库中的Render记录
-                render = Render.query.get(combo_id)
-                if render:
-                    render.duration = format_duration(total_duration)
-                    render.duration_seconds = total_duration
-                    render.tag = calculate_uniqueness_tag(combo)
+                # 批量获取或计算时长
+                duration_cache = {}
                 
-                # 每10个提交一次，减少数据库压力
-                if combo_index % 10 == 0:
-                    db.session.commit()
-            
-            # 最后提交剩余
-            db.session.commit()
-            
-            elapsed = time.time() - start_time
-            print(f"[Async Generate] Completed in {elapsed:.2f}s for user {user_id}")
-            
-        except Exception as e:
-            print(f"[Async Generate] Error: {e}")
-            db.session.rollback()
+                for combo_index, combo in enumerate(all_combos[:limit]):
+                    combo_id = f"combo_{user_id}_{combo_index}"
+                    
+                    # 计算总时长（使用缓存）
+                    total_duration = 0
+                    for m in combo:
+                        mat_id = m['id']
+                        if mat_id not in duration_cache:
+                            # 优先使用数据库中的duration_seconds
+                            if m.get('duration_seconds'):
+                                duration_cache[mat_id] = m['duration_seconds']
+                            elif m['type'] == 'image':
+                                duration_cache[mat_id] = 3.0
+                            else:
+                                #  fallback：从文件读取（应该很少发生）
+                                from utils import get_video_duration
+                                duration_cache[mat_id] = get_video_duration(m['unified_path'])
+                        total_duration += duration_cache[mat_id]
+                    
+                    # 更新数据库中的Render记录
+                    render = Render.query.get(combo_id)
+                    if render:
+                        render.duration = format_duration(total_duration)
+                        render.duration_seconds = total_duration
+                        render.tag = calculate_uniqueness_tag(combo)
+                    
+                    # 每10个提交一次，减少数据库压力
+                    if combo_index % 10 == 0:
+                        db.session.commit()
+                
+                # 最后提交剩余
+                db.session.commit()
+                
+                elapsed = time.time() - start_time
+                print(f"[Async Generate] Completed in {elapsed:.2f}s for user {user_id}")
+                
+            except Exception as e:
+                print(f"[Async Generate] Error: {e}")
+                import traceback
+                traceback.print_exc()
+                try:
+                    db.session.rollback()
+                except:
+                    pass
     
     # 启动后台线程
     thread = threading.Thread(target=async_task)
@@ -232,7 +239,9 @@ def generate_combinations():
         db.session.commit()
         
         # 启动异步任务计算准确时长和标签
-        generate_combinations_async(user_id, material_lists, shots_data, total_possible)
+        from flask import current_app
+        app = current_app._get_current_object()
+        generate_combinations_async(user_id, material_lists, shots_data, total_possible, app)
         
         print(f"[Generate] Quick response: {len(combinations)} combos in {(time.time() - request.start_time):.3f}s")
         

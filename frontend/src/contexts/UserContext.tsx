@@ -1,7 +1,7 @@
 /**
  * User Context - Manage user authentication and profile
  */
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
 
@@ -29,7 +29,6 @@ interface UserContextType {
   updateProfile: (data: Partial<User>) => Promise<void>;
   changePassword: (oldPassword: string, newPassword: string) => Promise<void>;
   refreshUser: () => Promise<void>;
-  onLogoutCallback?: () => void;
   setOnLogoutCallback: (callback: (() => void) | undefined) => void;
 }
 
@@ -46,7 +45,8 @@ const UserContext = createContext<UserContextType | undefined>(undefined);
 export function UserProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [onLogoutCallback, setOnLogoutCallback] = useState<(() => void) | undefined>(undefined);
+  // 使用 ref 存储回调，避免触发重新渲染
+  const onLogoutCallbackRef = useRef<(() => void) | undefined>(undefined);
 
   // Initialize user on mount
   useEffect(() => {
@@ -160,8 +160,8 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
     }
 
     // Call the logout callback to clear app state (combinations, etc.)
-    if (onLogoutCallback) {
-      onLogoutCallback();
+    if (onLogoutCallbackRef.current) {
+      onLogoutCallbackRef.current();
     }
 
     // Clear user state
@@ -219,6 +219,11 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  // 使用 ref 存储回调，直接修改 ref 不会触发重新渲染
+  const setOnLogoutCallback = useCallback((callback: (() => void) | undefined) => {
+    onLogoutCallbackRef.current = callback;
+  }, []);
+
   const value: UserContextType = {
     user,
     isLoading,
@@ -229,7 +234,6 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
     updateProfile,
     changePassword,
     refreshUser,
-    onLogoutCallback,
     setOnLogoutCallback
   };
 

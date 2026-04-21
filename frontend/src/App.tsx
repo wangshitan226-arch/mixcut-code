@@ -58,6 +58,18 @@ function AppContent() {
   const [isLoading, setIsLoading] = useState(false);
   const [selectedQuality, setSelectedQuality] = useState<'low' | 'medium' | 'high' | 'ultra'>('medium');
 
+  // 全局加载状态：UserContext初始化完成前显示加载界面
+  if (userLoading) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="flex flex-col items-center text-gray-400">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
+          <p className="text-sm">初始化中...</p>
+        </div>
+      </div>
+    );
+  }
+
   // Set up logout callback to clear app state
   useEffect(() => {
     setOnLogoutCallback(() => {
@@ -241,26 +253,19 @@ function AppContent() {
       <div className="flex-1 overflow-hidden flex flex-col">
         {mainTab === 'home' && <HomeScreen onNavigate={() => setMainTab('edit')} />}
         {mainTab === 'edit' && (
-          user?.id ? (
-            <EditScreen 
-              userId={user.id}
-              shots={shots}
-              onBack={() => setMainTab('home')} 
-              onSynthesize={handleSynthesize}
-              onAddShot={handleAddShot}
-              onDeleteShot={handleDeleteShot}
-              onDeleteMaterial={handleDeleteMaterial}
-              onRefresh={handleMaterialUploaded}
-              isLoading={isLoading}
-              selectedQuality={selectedQuality}
-              onQualityChange={setSelectedQuality}
-            />
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full text-gray-400">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-4"></div>
-              <p className="text-sm">加载中...</p>
-            </div>
-          )
+          <EditScreen 
+            userId={user!.id}
+            shots={shots}
+            onBack={() => setMainTab('home')} 
+            onSynthesize={handleSynthesize}
+            onAddShot={handleAddShot}
+            onDeleteShot={handleDeleteShot}
+            onDeleteMaterial={handleDeleteMaterial}
+            onRefresh={handleMaterialUploaded}
+            isLoading={isLoading}
+            selectedQuality={selectedQuality}
+            onQualityChange={setSelectedQuality}
+          />
         )}
         {mainTab === 'results' && (
           <ResultsScreen 

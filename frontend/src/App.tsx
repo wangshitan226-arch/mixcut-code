@@ -12,6 +12,7 @@ import HomeScreen from './components/HomeScreen';
 import EditScreen from './components/EditScreen';
 import ResultsScreen from './components/ResultsScreen';
 import ProfileScreen from './components/ProfileScreen';
+import KaipaiEditor from './components/KaipaiEditor';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
 
@@ -57,6 +58,11 @@ function AppContent() {
   const [combinations, setCombinations] = useState<Combination[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedQuality, setSelectedQuality] = useState<'low' | 'medium' | 'high' | 'ultra'>('medium');
+  
+  // Kaipai Editor state
+  const [showKaipaiEditor, setShowKaipaiEditor] = useState(false);
+  const [kaipaiEditId, setKaipaiEditId] = useState<string>('');
+  const [kaipaiVideoUrl, setKaipaiVideoUrl] = useState<string>('');
 
   // Set up logout callback to clear app state
   useEffect(() => {
@@ -235,6 +241,27 @@ function AppContent() {
     }
   }, [mainTab]);
 
+  // Listen for openKaipaiEditor event from HomeScreen
+  useEffect(() => {
+    const handleOpenKaipaiEditor = (e: CustomEvent) => {
+      const { editId, videoUrl } = e.detail;
+      setKaipaiEditId(editId);
+      setKaipaiVideoUrl(videoUrl);
+      setShowKaipaiEditor(true);
+    };
+
+    window.addEventListener('openKaipaiEditor', handleOpenKaipaiEditor as EventListener);
+    return () => {
+      window.removeEventListener('openKaipaiEditor', handleOpenKaipaiEditor as EventListener);
+    };
+  }, []);
+
+  const handleCloseKaipaiEditor = () => {
+    setShowKaipaiEditor(false);
+    setKaipaiEditId('');
+    setKaipaiVideoUrl('');
+  };
+
   // 全局加载状态：UserContext初始化完成前显示加载界面
   if (userLoading) {
     return (
@@ -251,7 +278,7 @@ function AppContent() {
     <div className="h-[100dvh] w-full bg-gray-50 overflow-hidden flex flex-col relative">
       {/* Dynamic Content based on Main Tab */}
       <div className="flex-1 overflow-hidden flex flex-col">
-        {mainTab === 'home' && <HomeScreen onNavigate={() => setMainTab('edit')} />}
+        {mainTab === 'home' && <HomeScreen onNavigate={() => setMainTab('edit')} userId={user?.id} />}
         {mainTab === 'edit' && user?.id && (
           <EditScreen 
             userId={user.id}
@@ -284,6 +311,16 @@ function AppContent() {
           <ProfileScreen onNavigate={(tab) => setMainTab(tab as any)} />
         )}
       </div>
+
+      {/* Kaipai Editor Modal */}
+      {showKaipaiEditor && kaipaiEditId && (
+        <KaipaiEditor
+          editId={kaipaiEditId}
+          videoUrl={kaipaiVideoUrl}
+          onBack={handleCloseKaipaiEditor}
+          onSave={handleCloseKaipaiEditor}
+        />
+      )}
 
       {/* Bottom Navigation */}
       <div className="bg-white border-t border-gray-200 flex justify-around items-center pb-[env(safe-area-inset-bottom)] pt-2 px-2 h-16 shrink-0 z-50">

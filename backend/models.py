@@ -94,6 +94,70 @@ class Render(db.Model):
     duration = db.Column(db.String(10))
     duration_seconds = db.Column(db.Float)
     thumbnail = db.Column(db.String(500))
-    file_path = db.Column(db.String(500))
+    file_path = db.Column(db.String(500))  # 本地文件路径（用于预览）
+    oss_url = db.Column(db.String(500))    # OSS URL（用于下载/文字快剪）
     status = db.Column(db.String(20), default='pending')
     created_at = db.Column(db.DateTime, default=db.func.now())
+
+
+class KaipaiEdit(db.Model):
+    """Kaipai editing task model - 开拍式剪辑任务/草稿"""
+    __tablename__ = 'kaipai_edits'
+    
+    id = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
+    render_id = db.Column(db.String(100), db.ForeignKey('renders.id'), nullable=False)
+    parent_id = db.Column(db.String(36), db.ForeignKey('kaipai_edits.id'), nullable=True)
+    version = db.Column(db.Integer, default=1, nullable=False)
+    
+    # 视频信息
+    original_video_url = db.Column(db.String(500), nullable=False)
+    output_video_url = db.Column(db.String(500), nullable=True)
+    
+    # 语音识别结果（JSON格式保存完整结果）
+    asr_result = db.Column(db.Text, nullable=True)  # JSON: {sentences, videoInfo}
+    
+    # 视频片段信息（用于预览剪辑效果）
+    segment_urls = db.Column(db.Text, nullable=True)  # JSON: [{id, url, beginTime, endTime}]
+    segment_status = db.Column(db.String(20), default='pending')  # pending, processing, completed, failed
+    
+    # 编辑参数（JSON格式）
+    edit_params = db.Column(db.Text, nullable=True)  # JSON: {removed_segments, subtitle_style, bgm, template}
+    
+    # 剪辑历史记录（用于撤回功能）
+    edit_history = db.Column(db.Text, nullable=True)  # JSON array of edit actions
+    
+    # 状态: draft, transcribing, processing, completed, failed
+    status = db.Column(db.String(20), default='draft')
+    
+    # 草稿标题
+    title = db.Column(db.String(200), nullable=True)
+    
+    # 时间戳
+    created_at = db.Column(db.DateTime, default=db.func.now())
+    updated_at = db.Column(db.DateTime, default=db.func.now(), onupdate=db.func.now())
+    
+    # 关联
+    render = db.relationship('Render', backref='kaipai_edits', lazy=True)
+    user = db.relationship('User', backref='kaipai_edits', lazy=True)
+    
+    def to_dict(self):
+        import json
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'render_id': self.render_id,
+            'parent_id': self.parent_id,
+            'version': self.version,
+            'title': self.title,
+            'original_video_url': self.original_video_url,
+            'output_video_url': self.output_video_url,
+            'asr_result': json.loads(self.asr_result) if self.asr_result else None,
+            'segment_urls': json.loads(self.segment_urls) if self.segment_urls else [],
+            'segment_status': self.segment_status,
+            'edit_params': json.loads(self.edit_params) if self.edit_params else None,
+            'edit_history': json.loads(self.edit_history) if self.edit_history else [],
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }

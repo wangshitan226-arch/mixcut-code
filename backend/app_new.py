@@ -54,7 +54,7 @@ from extensions import db
 from websocket import socketio, init_websocket
 
 # Import models to ensure they are registered with SQLAlchemy
-from models import User, Shot, Material, Render
+from models import User, Shot, Material, Render, KaipaiEdit
 
 # Import blueprints
 from routes import ( 
@@ -65,7 +65,8 @@ from routes import (
     upload_bp,
     generate_bp,
     renders_bp,
-    static_bp
+    static_bp,
+    kaipai_bp
 )
 
 
@@ -107,7 +108,13 @@ def start_cleanup_scheduler():
 def create_app():
     """Application factory pattern"""
     app = Flask(__name__)
-    CORS(app)
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": ["http://localhost:3000", "http://127.0.0.1:3000"],
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"]
+        }
+    })
     
     # Configuration
     app.config['SQLALCHEMY_DATABASE_URI'] = SQLALCHEMY_DATABASE_URI
@@ -129,6 +136,7 @@ def create_app():
     app.register_blueprint(generate_bp)
     app.register_blueprint(renders_bp)
     app.register_blueprint(static_bp)
+    app.register_blueprint(kaipai_bp)
     
     # Create tables
     with app.app_context():

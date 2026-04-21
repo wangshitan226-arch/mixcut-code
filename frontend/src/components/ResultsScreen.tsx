@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { ChevronLeft, CheckCircle2, Circle, Clock, Download, Play, Loader2, Pause, Square } from 'lucide-react';
+import { ChevronLeft, CheckCircle2, Circle, Clock, Download, Play, Loader2, Pause, Square, Scissors } from 'lucide-react';
+import KaipaiEditor from './KaipaiEditor';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
 
@@ -54,6 +55,12 @@ export default function ResultsScreen({
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [previewProgress, setPreviewProgress] = useState({ completed: 0, total: 0 });
+  
+  // Kaipai Editor state
+  const [showKaipaiEditor, setShowKaipaiEditor] = useState(false);
+  const [kaipaiEditId, setKaipaiEditId] = useState<string>('');
+  const [kaipaiVideoUrl, setKaipaiVideoUrl] = useState<string>('');
+  const [kaipaiLoadingId, setKaipaiLoadingId] = useState<string | null>(null);
 
   // Initialize results from props
   useEffect(() => {
@@ -324,6 +331,61 @@ export default function ResultsScreen({
     }
   }, [results]);
 
+  // 打开网感剪辑（使用选中的视频）
+  const handleOpenKaipai = useCallback(async () => {
+    const selectedItems = results.filter(r => r.selected);
+    if (selectedItems.length === 0) {
+      alert('请先选择一个视频');
+      return;
+    }
+    if (selectedItems.length > 1) {
+      alert('请只选择一个视频进行文字快剪');
+      return;
+    }
+    
+    const item = selectedItems[0];
+    
+    // 确保视频已合成
+    let videoUrl = item.preview_url;
+    if (item.preview_status !== 'completed' || !videoUrl) {
+      setKaipaiLoadingId(item.id);
+      videoUrl = await triggerConcat(item);
+      setKaipaiLoadingId(null);
+      if (!videoUrl) {
+        alert('视频合成失败，请重试');
+        return;
+      }
+    }
+    
+    try {
+      // 创建 KaipaiEdit 任务
+      const response = await fetch(`${API_BASE_URL}/api/renders/${item.id}/kaipai/edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || '创建剪辑任务失败');
+      }
+      
+      const data = await response.json();
+      console.log('Kaipai edit created:', data);
+      setKaipaiEditId(data.edit_id);
+      setKaipaiVideoUrl(data.video_url);
+      setShowKaipaiEditor(true);
+    } catch (error: any) {
+      alert('创建剪辑任务失败：' + error.message);
+    }
+  }, [results]);
+
+  // 关闭网感剪辑
+  const handleCloseKaipai = () => {
+    setShowKaipaiEditor(false);
+    setKaipaiEditId('');
+    setKaipaiVideoUrl('');
+  };
+
   const filteredResults = activeFilter === '全部' 
     ? results 
     : results.filter(r => r.tag === activeFilter);
@@ -514,19 +576,48 @@ export default function ResultsScreen({
             </button>
             <span className="text-xs text-gray-500">已选 <strong className="text-blue-600">{selectedCount}</strong></span>
           </div>
-          <button 
-            onClick={handleBatchDownload}
-            disabled={selectedCount === 0}
-            className={`flex items-center gap-1 px-4 py-2 rounded-full font-medium text-xs ${
-              selectedCount > 0 
-                ? 'bg-blue-600 text-white' 
-                : 'bg-gray-100 text-gray-400'
-            }`}
-          >
-            <Download size={14} />
-            下载选中 ({selectedCount})
-          </button>
+          <div className="flex items-center gap-2">
+            {/* 文字快剪按钮 - 只选中一个视频时可用 */}
+            <button 
+              onClick={handleOpenKaipai}
+              disabled={selectedCount !== 1 || kaipaiLoadingId !== null}
+              className={`flex items-center gap-1 px-4 py-2 rounded-full font-medium text-xs ${
+                selectedCount === 1 && !kaipaiLoadingId
+                  ? 'bg-purple-600 text-white' 
+                  : 'bg-gray-100 text-gray-400'
+              }`}
+            >
+              {kaipaiLoadingId ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Scissors size={14} />
+              )}
+              文字快剪
+            </button>
+            <button 
+              onClick={handleBatchDownload}
+              disabled={selectedCount === 0}
+              className={`flex items-center gap-1 px-4 py-2 rounded-full font-medium text-xs ${
+                selectedCount > 0 
+                  ? 'bg-blue-600 text-white' 
+                  : 'bg-gray-100 text-gray-400'
+              }`}
+            >
+              <Download size={14} />
+              下载选中 ({selectedCount})
+            </button>
+          </div>
         </div>
+      )}
+
+      {/* Kaipai Editor Modal */}
+      {showKaipaiEditor && kaipaiEditId && (
+        <KaipaiEditor
+          editId={kaipaiEditId}
+          videoUrl={kaipaiVideoUrl}
+          onBack={handleCloseKaipai}
+          onSave={handleCloseKaipai}
+        />
       )}
     </div>
   );

@@ -1,44 +1,130 @@
 """
-Render result routes
+Render result routes - 优化版本：本地预览 + OSS下载
+优化点：
+1. 视频合成后保存本地文件，用于流畅预览
+2. 后台异步上传OSS，用于下载和文字快剪
+3. 预览优先使用本地文件，下载使用OSS URL
+4. 本地文件按原逻辑清理（素材变化时）
 """
-from flask import Blueprint, request, jsonify, send_from_directory
+from flask import Blueprint, request, jsonify, send_from_directory, current_app
 import os
 import uuid
 import threading
 import json
+import time
 from models import User, Render, Material
 from extensions import db, render_tasks
 from config import RENDERS_FOLDER
 from utils import fast_concat_videos
+from utils.oss import oss_client
 
 renders_bp = Blueprint('renders', __name__, url_prefix='/api')
 
 
-def fast_concat_task(task_id, combo_id, unified_files, output_path):
-    """Fast concat using -c copy"""
-    render_tasks[task_id] = {
-        'id': task_id,
-        'combo_id': combo_id,
-        'status': 'processing',
-        'progress': 0,
-        'output_path': output_path
-    }
+def update_render_oss_url(combo_id, oss_url, app):
+    """
+    OSS上传完成后，更新数据库的oss_url字段
     
-    try:
-        render_tasks[task_id]['progress'] = 50
-        success = fast_concat_videos(unified_files, output_path)
+    Args:
+        combo_id: 渲染组合ID
+        oss_url: OSS URL
+        app: Flask应用实例
+    """
+    with app.app_context():
+        try:
+            render = Render.query.get(combo_id)
+            if render:
+                render.oss_url = oss_url
+                db.session.commit()
+                print(f"[OSS] 数据库已更新: {combo_id} -> OSS URL={oss_url}")
+            else:
+                print(f"[OSS] 未找到渲染记录: {combo_id}")
+        except Exception as e:
+            print(f"[OSS] 更新数据库失败: {e}")
+            db.session.rollback()
+
+
+def fast_concat_task(task_id, combo_id, unified_files, output_path, user_id=None, app=None):
+    """
+    Fast concat using -c copy
+    优化：合成后保存本地文件，后台异步上传OSS
+    """
+    if app is None:
+        from app_new import create_app
+        app = create_app()
+    
+    with app.app_context():
+        db.app = app
         
-        if success and os.path.exists(output_path):
-            render_tasks[task_id]['progress'] = 100
-            render_tasks[task_id]['status'] = 'completed'
-            render_tasks[task_id]['video_url'] = f'/renders/{os.path.basename(output_path)}'
-        else:
-            render_tasks[task_id]['status'] = 'failed'
-            render_tasks[task_id]['error'] = 'Concat failed'
+        render_tasks[task_id] = {
+            'id': task_id,
+            'combo_id': combo_id,
+            'status': 'processing',
+            'progress': 0,
+            'output_path': output_path
+        }
+        
+        try:
+            render_tasks[task_id]['progress'] = 50
+            success = fast_concat_videos(unified_files, output_path)
             
-    except Exception as e:
-        render_tasks[task_id]['status'] = 'failed'
-        render_tasks[task_id]['error'] = str(e)
+            if success and os.path.exists(output_path):
+                # 立即返回本地URL（用户流畅预览）
+                render_tasks[task_id]['progress'] = 100
+                render_tasks[task_id]['status'] = 'completed'
+                render_tasks[task_id]['video_url'] = f'/renders/{os.path.basename(output_path)}'
+                
+                # 更新数据库：保存本地文件路径
+                try:
+                    render = Render.query.get(combo_id)
+                    if render:
+                        render.file_path = output_path
+                        render.status = 'completed'
+                        db.session.commit()
+                        print(f"[RENDER] 数据库已更新（本地）: {combo_id} -> {output_path}")
+                except Exception as db_error:
+                    print(f"[RENDER] 数据库更新失败: {db_error}")
+                    db.session.rollback()
+                
+                print(f"[RENDER] 任务 {task_id} 完成（本地）: {output_path}")
+                
+                # 后台异步上传OSS（不删除本地文件）
+                def oss_callback(oss_url, success):
+                    """OSS上传完成后的回调"""
+                    if success and oss_url:
+                        render_tasks[task_id]['oss_url'] = oss_url
+                        render_tasks[task_id]['oss_uploaded'] = True
+                        # 只更新oss_url字段，保留本地文件
+                        update_render_oss_url(combo_id, oss_url, app)
+                    else:
+                        render_tasks[task_id]['oss_uploaded'] = False
+                        print(f"[OSS] 上传失败: {combo_id}")
+                
+                # 获取用户信息（用于判断匿名用户）
+                try:
+                    user = User.query.get(user_id) if user_id else None
+                except:
+                    user = None
+                
+                print(f"[OSS] 启动异步上传: {combo_id}")
+                oss_client.upload_render_async(
+                    local_path=output_path,
+                    render_id=combo_id,
+                    user_id=user_id,
+                    user_obj=user,
+                    callback=oss_callback
+                )
+                
+            else:
+                render_tasks[task_id]['status'] = 'failed'
+                render_tasks[task_id]['error'] = 'Concat failed'
+                
+        except Exception as e:
+            print(f"[RENDER] 任务 {task_id} 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            render_tasks[task_id]['status'] = 'failed'
+            render_tasks[task_id]['error'] = str(e)
 
 
 @renders_bp.route('/renders', methods=['GET'])
@@ -60,7 +146,28 @@ def get_renders():
         
         combinations = []
         for render in renders:
-            file_exists = render.file_path and os.path.exists(render.file_path)
+            # 优先使用本地文件预览（速度快）
+            file_exists = False
+            video_url = None
+            oss_uploading = False
+            oss_uploaded = False
+            
+            if render.file_path and os.path.exists(render.file_path):
+                # 本地文件存在，用于预览
+                file_exists = True
+                video_url = f'/renders/{os.path.basename(render.file_path)}'
+            elif render.oss_url:
+                # 本地不存在但有OSS URL
+                file_exists = True
+                video_url = render.oss_url
+                oss_uploaded = True
+            
+            # 检查是否正在上传OSS
+            if not render.oss_url and not oss_uploaded:
+                for task_id, task in render_tasks.items():
+                    if task.get('combo_id') == render.id and task.get('status') == 'completed' and not task.get('oss_uploaded'):
+                        oss_uploading = True
+                        break
             
             try:
                 material_ids = json.loads(render.material_ids)
@@ -89,7 +196,10 @@ def get_renders():
                 'duration_seconds': render.duration_seconds,
                 'tag': render.tag,
                 'preview_status': 'completed' if file_exists else 'pending',
-                'preview_url': f'/renders/{os.path.basename(render.file_path)}' if file_exists else None
+                'preview_url': video_url,  # 优先本地文件，流畅预览
+                'oss_url': render.oss_url,  # OSS URL（用于下载）
+                'oss_uploading': oss_uploading,
+                'oss_uploaded': bool(render.oss_url)
             }
             combinations.append(combo_data)
         
@@ -116,14 +226,23 @@ def render_combination_video(combo_id):
         if not render or render.user_id != user_id:
             return jsonify({'error': '组合不存在'}), 404
         
-        # Check if there's already a completed render for this combo
+        # 检查本地文件是否存在（优先本地，速度快）
         if render.file_path and os.path.exists(render.file_path):
             return jsonify({
                 'status': 'completed',
-                'video_url': f'/renders/{os.path.basename(render.file_path)}'
+                'video_url': f'/renders/{os.path.basename(render.file_path)}',
+                'source': 'local'
             })
         
-        # Check if there's an ongoing task
+        # 检查OSS URL是否存在（兜底）
+        if render.oss_url:
+            return jsonify({
+                'status': 'completed',
+                'video_url': render.oss_url,
+                'source': 'oss'
+            })
+        
+        # 检查是否有正在进行的任务
         for task_id, task in render_tasks.items():
             if task.get('combo_id') == combo_id and task['status'] == 'processing':
                 return jsonify({
@@ -132,8 +251,7 @@ def render_combination_video(combo_id):
                     'progress': task.get('progress', 0)
                 })
         
-        # Generate unique filename with timestamp to avoid conflicts
-        import time
+        # 生成新视频
         timestamp = int(time.time())
         output_filename = f"render_{combo_id}_{timestamp}.mp4"
         output_path = os.path.join(RENDERS_FOLDER, output_filename)
@@ -150,14 +268,15 @@ def render_combination_video(combo_id):
             return jsonify({'error': '素材文件不存在'}), 404
         
         task_id = f"task_{uuid.uuid4().hex[:8]}"
+        app = current_app._get_current_object()
+        
         thread = threading.Thread(
             target=fast_concat_task,
-            args=(task_id, combo_id, material_files, output_path)
+            args=(task_id, combo_id, material_files, output_path, user_id, app)
         )
         thread.daemon = True
         thread.start()
         
-        # Update render record with new file path
         render.file_path = output_path
         render.status = 'processing'
         db.session.commit()
@@ -187,6 +306,7 @@ def get_task_status(task_id):
     
     if task['status'] == 'completed':
         response['video_url'] = task.get('video_url')
+        response['oss_uploaded'] = task.get('oss_uploaded', False)
     elif task['status'] == 'failed':
         response['error'] = task.get('error')
     
@@ -195,44 +315,43 @@ def get_task_status(task_id):
 
 @renders_bp.route('/combinations/<combo_id>/download', methods=['POST'])
 def download_combination(combo_id):
-    """Download video"""
+    """Download video - 优先使用OSS URL"""
     try:
         parts = combo_id.split('_')
         if len(parts) < 3 or parts[0] != 'combo':
             return jsonify({'error': '无效的组合ID'}), 400
         
         render = Render.query.get(combo_id)
-        if not render or not render.file_path:
+        if not render:
             return jsonify({
                 'status': 'failed',
-                'error': '视频文件不存在，请重新生成'
+                'error': '视频不存在'
             }), 404
         
-        output_path = render.file_path
-        output_filename = os.path.basename(output_path)
-        
-        if not os.path.exists(output_path):
+        # 优先使用OSS URL（用于下载和文字快剪）
+        if render.oss_url:
             return jsonify({
-                'status': 'failed',
-                'error': '视频文件不存在，请重新生成'
-            }), 404
+                'status': 'completed',
+                'video_url': render.oss_url,
+                'mode': 'redirect',
+                'source': 'oss'
+            })
         
-        data = request.json or {}
-        download_mode = data.get('mode', 'proxy')
-        
-        if download_mode == 'redirect':
+        # 如果没有OSS URL，使用本地文件
+        if render.file_path and os.path.exists(render.file_path):
+            output_filename = os.path.basename(render.file_path)
             return jsonify({
                 'status': 'completed',
                 'video_url': f'/renders/{output_filename}',
                 'download_url': f'/api/download/file?path={output_filename}&name=mixcut_{combo_id}.mp4',
-                'mode': 'redirect'
+                'mode': 'redirect',
+                'source': 'local'
             })
-        else:
-            return jsonify({
-                'status': 'completed',
-                'video_url': f'/renders/{output_filename}',
-                'mode': 'proxy'
-            })
+        
+        return jsonify({
+            'status': 'failed',
+            'error': '视频文件不存在，请重新生成'
+        }), 404
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500

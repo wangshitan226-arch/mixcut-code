@@ -9,7 +9,9 @@ import os
 import subprocess
 import threading
 import logging
+import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from models import Render, KaipaiEdit
 from extensions import db
 from utils.oss import oss_client
@@ -19,8 +21,108 @@ logger = logging.getLogger(__name__)
 
 kaipai_bp = Blueprint('kaipai', __name__, url_prefix='/api')
 
-# 渲染任务存储
+# 渲染任务存储（使用线程锁保护）
 render_tasks = {}
+render_tasks_lock = threading.Lock()
+
+# 任务队列限制（最大并发数）
+MAX_CONCURRENT_RENDERS = 3
+render_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_RENDERS)
+
+# 全局计数器用于唯一文件名
+_file_counter = 0
+_file_counter_lock = threading.Lock()
+
+def get_unique_filename(prefix='temp'):
+    """生成唯一的文件名，包含时间戳、计数器和随机UUID"""
+    global _file_counter
+    with _file_counter_lock:
+        _file_counter += 1
+        counter = _file_counter
+    timestamp = int(time.time() * 1000)
+    random_id = uuid.uuid4().hex[:12]
+    return f"{prefix}_{timestamp}_{counter}_{random_id}"
+
+
+def get_video_duration(video_path):
+    """使用ffprobe获取视频实际时长（毫秒）"""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            duration_sec = float(result.stdout.strip())
+            return int(duration_sec * 1000)
+    except Exception as e:
+        logger.error(f"获取视频时长失败: {e}")
+    return None
+
+
+def merge_overlapping_ranges(ranges):
+    """合并重叠的时间段"""
+    if not ranges:
+        return []
+    
+    # 按开始时间排序
+    sorted_ranges = sorted(ranges, key=lambda x: x[0])
+    merged = [sorted_ranges[0]]
+    
+    for current in sorted_ranges[1:]:
+        last = merged[-1]
+        # 如果当前段与上一段重叠或相邻（间隔小于100ms）
+        if current[0] <= last[1] + 100:
+            merged[-1] = (last[0], max(last[1], current[1]))
+        else:
+            merged.append(current)
+    
+    return merged
+
+
+def calculate_keep_segments(removed_segments, video_duration_ms, buffer_ms=150):
+    """
+    计算保留的时间段，处理重叠的删除段
+    
+    Args:
+        removed_segments: 要删除的片段列表
+        video_duration_ms: 视频总时长（毫秒）
+        buffer_ms: 缓冲时间（毫秒），用于处理ASR时间戳不精确的问题
+                  默认150ms，会向前和向后各扩展150ms
+    """
+    if not removed_segments:
+        # 没有删除任何片段，保留全部
+        return [(0, video_duration_ms)]
+    
+    # 获取要删除的时间段（添加缓冲时间）
+    removed_times = []
+    for s in removed_segments:
+        # 向前和向后扩展缓冲时间，确保完全删除
+        start = max(0, s['beginTime'] - buffer_ms)
+        end = min(video_duration_ms, s['endTime'] + buffer_ms)
+        removed_times.append((start, end))
+    
+    # 合并重叠的删除时间段
+    removed_times_merged = merge_overlapping_ranges(removed_times)
+    
+    # 计算保留的时间段
+    keep_segments = []
+    current_time = 0
+    
+    for removed_start, removed_end in removed_times_merged:
+        # 当前时间到删除开始时间之间的部分保留
+        if current_time < removed_start:
+            keep_segments.append((current_time, removed_start))
+        # 跳到删除结束时间
+        current_time = max(current_time, removed_end)
+    
+    # 保留最后一段（从最后一个删除点到视频结束）
+    if current_time < video_duration_ms:
+        keep_segments.append((current_time, video_duration_ms))
+    
+    return keep_segments
 
 
 @kaipai_bp.route('/renders/<render_id>/kaipai/edit', methods=['POST'])
@@ -217,18 +319,30 @@ def update_kaipai_edit(edit_id):
     current_params = json.loads(edit.edit_params) if edit.edit_params else {}
     edit_history = json.loads(edit.edit_history) if edit.edit_history else []
     
+    # 获取当前已删除的片段列表
+    existing_removed = current_params.get('removed_segments', [])
+    new_removed = data.get('removed_segments', [])
+    
+    # 合并删除的片段（去重，基于id）
+    existing_ids = {s.get('id') for s in existing_removed}
+    merged_removed = existing_removed.copy()
+    for seg in new_removed:
+        if seg.get('id') not in existing_ids:
+            merged_removed.append(seg)
+            existing_ids.add(seg.get('id'))
+    
     # 记录编辑操作到历史
     action = {
         'timestamp': datetime.now().isoformat(),
         'action': 'update',
-        'removed_segments': data.get('removed_segments', []),
-        'previous_segments': current_params.get('removed_segments', [])
+        'removed_segments': new_removed,
+        'previous_segments': existing_removed
     }
     edit_history.append(action)
     
     # 更新编辑参数
     current_params.update({
-        'removed_segments': data.get('removed_segments', []),
+        'removed_segments': merged_removed,
         'subtitle_style': data.get('subtitle_style', {}),
         'bgm': data.get('bgm', {}),
         'template': data.get('template', {})
@@ -334,9 +448,17 @@ def update_subtitle(edit_id):
     })
 
 
+def _update_render_task(task_id, **kwargs):
+    """线程安全地更新渲染任务状态，如果不存在则创建"""
+    with render_tasks_lock:
+        if task_id not in render_tasks:
+            render_tasks[task_id] = {}
+        render_tasks[task_id].update(kwargs)
+
+
 @kaipai_bp.route('/kaipai/<edit_id>/render', methods=['POST'])
 def start_render(edit_id):
-    """启动视频渲染（裁剪）"""
+    """启动视频渲染（裁剪）- 使用线程池限制并发"""
     edit = KaipaiEdit.query.get(edit_id)
     if not edit:
         return jsonify({'error': 'Edit not found'}), 404
@@ -345,136 +467,219 @@ def start_render(edit_id):
     edit_params = json.loads(edit.edit_params) if edit.edit_params else {}
     removed_segments = edit_params.get('removed_segments', [])
     
-    if not removed_segments:
-        return jsonify({'error': '没有要删除的片段'}), 400
-    
     # 获取所有需要在异步线程中使用的数据（避免session问题）
     video_url = edit.original_video_url
     user_id = edit.user_id
     asr_result = json.loads(edit.asr_result) if edit.asr_result else {}
     
-    # 启动异步渲染任务
+    # 生成任务ID并初始化
     task_id = str(uuid.uuid4())
-    render_tasks[task_id] = {
-        'status': 'processing',
+    _update_render_task(task_id, **{
+        'status': 'queued',
         'progress': 0,
         'output_url': None,
         'error': None
-    }
+    })
     
     # 获取当前应用实例（用于创建应用上下文）
     from flask import current_app
     app = current_app._get_current_object()
     
-    # 异步执行视频裁剪
+    # 使用线程池提交任务（限制并发数）
     def render_video():
         with app.app_context():
+            _update_render_task(task_id, status='processing', progress=5)
+            temp_files_to_cleanup = []
+            local_video_path = None
+            
             try:
-                render_tasks[task_id]['progress'] = 10
+                # 下载原始视频到本地（使用唯一文件名）
+                local_video_path = os.path.join('uploads', get_unique_filename('video'))
+                if video_url.startswith('http'):
+                    import requests
+                    logger.info(f"[Render {task_id}] 下载视频: {video_url[:80]}...")
+                    response = requests.get(video_url, timeout=120)
+                    response.raise_for_status()
+                    with open(local_video_path, 'wb') as f:
+                        f.write(response.content)
+                    logger.info(f"[Render {task_id}] 视频下载完成: {len(response.content)} bytes")
+                else:
+                    local_video_path = video_url.lstrip('/')
+                    logger.info(f"[Render {task_id}] 使用本地视频: {local_video_path}")
                 
-                # 计算保留的时间段（反向思考：删除selected的segments）
-                all_segments = asr_result.get('sentences', [])
+                _update_render_task(task_id, progress=15)
                 
-                # 获取要删除的时间段
-                removed_times = [(s['beginTime'], s['endTime']) for s in removed_segments]
+                # 使用ffprobe获取视频实际时长
+                video_duration_ms = get_video_duration(local_video_path)
+                if video_duration_ms is None:
+                    # 降级使用ASR结果中的时长
+                    video_duration_ms = asr_result.get('videoInfo', {}).get('duration', 0) * 1000
+                    logger.warning(f"[Render {task_id}] 使用ASR时长: {video_duration_ms}ms")
+                else:
+                    logger.info(f"[Render {task_id}] 视频实际时长: {video_duration_ms}ms")
                 
-                # 计算保留的时间段
-                keep_segments = []
-                video_duration = asr_result.get('videoInfo', {}).get('duration', 0) * 1000
+                if video_duration_ms <= 0:
+                    raise Exception('无法获取视频时长')
                 
-                current_time = 0
-                for seg in all_segments:
-                    seg_start = seg['beginTime']
-                    seg_end = seg['endTime']
-                    
-                    # 检查这个片段是否被选中删除
-                    is_removed = any(r[0] <= seg_start and r[1] >= seg_end for r in removed_times)
-                    
-                    if not is_removed:
-                        keep_segments.append((seg_start, seg_end))
+                _update_render_task(task_id, progress=25)
                 
-                render_tasks[task_id]['progress'] = 30
+                # 计算保留的时间段（处理重叠的删除段）
+                keep_segments = calculate_keep_segments(removed_segments, video_duration_ms)
+                logger.info(f"[Render {task_id}] 保留时间段: {keep_segments}")
                 
-                # 使用ffmpeg裁剪视频
-                output_filename = f"kaipai_render_{edit_id}_{int(datetime.now().timestamp())}.mp4"
-                output_path = os.path.join('renders', output_filename)
-                
-                # 构建ffmpeg命令 - 使用复杂滤镜拼接多个时间段
                 if len(keep_segments) == 0:
                     raise Exception('没有可保留的视频片段')
                 
-                # 下载原始视频到本地
-                local_video_path = os.path.join('uploads', f'temp_{edit_id}.mp4')
-                if video_url.startswith('http'):
-                    import requests
-                    response = requests.get(video_url)
-                    with open(local_video_path, 'wb') as f:
-                        f.write(response.content)
+                _update_render_task(task_id, progress=30)
+                
+                # 生成输出文件名
+                output_filename = f"kaipai_render_{edit_id}_{int(datetime.now().timestamp())}.mp4"
+                output_path = os.path.join('renders', output_filename)
+                
+                # 构建ffmpeg命令
+                if len(keep_segments) == 1:
+                    # 只有一段，直接裁剪
+                    start_sec = keep_segments[0][0] / 1000
+                    duration = (keep_segments[0][1] - keep_segments[0][0]) / 1000
+                    logger.info(f"[Render {task_id}] 单段裁剪: {start_sec}s - {start_sec+duration}s")
+                    
+                    cmd = [
+                        'ffmpeg', '-y', '-i', local_video_path,
+                        '-ss', str(start_sec), '-t', str(duration),
+                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                        '-c:a', 'aac', '-b:a', '128k',
+                        output_path
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        logger.error(f"[Render {task_id}] FFmpeg错误: {result.stderr}")
+                        raise Exception(f'视频裁剪失败: {result.stderr[:200]}')
                 else:
-                    local_video_path = video_url.lstrip('/')
+                    # 多段，先分割成临时文件，再用concat demuxer拼接
+                    logger.info(f"[Render {task_id}] 多段拼接: {len(keep_segments)} 段")
+                    
+                    try:
+                        # 第一步：将每个时间段分割成临时文件（使用唯一文件名）
+                        for i, (start, end) in enumerate(keep_segments):
+                            start_sec = start / 1000
+                            duration = (end - start) / 1000
+                            temp_file = os.path.join('renders', get_unique_filename('segment') + '.mp4')
+                            temp_files_to_cleanup.append(temp_file)
+                            
+                            logger.info(f"[Render {task_id}] 分割段 {i+1}/{len(keep_segments)}: {start_sec}s - {start_sec+duration}s")
+                            
+                            segment_cmd = [
+                                'ffmpeg', '-y', '-i', local_video_path,
+                                '-ss', str(start_sec), '-t', str(duration),
+                                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                                '-c:a', 'aac', '-b:a', '128k',
+                                temp_file
+                            ]
+                            result = subprocess.run(segment_cmd, capture_output=True, text=True)
+                            if result.returncode != 0:
+                                logger.error(f"[Render {task_id}] 分割段 {i+1} 失败: {result.stderr}")
+                                raise Exception(f'分割视频段失败: {result.stderr[:200]}')
+                        
+                        _update_render_task(task_id, progress=60)
+                        
+                        # 第二步：创建concat列表文件
+                        list_file = os.path.join('renders', get_unique_filename('concat_list') + '.txt')
+                        temp_files_to_cleanup.append(list_file)
+                        
+                        with open(list_file, 'w') as f:
+                            for temp_file in temp_files_to_cleanup:
+                                if temp_file.endswith('.mp4'):
+                                    abs_path = os.path.abspath(temp_file).replace('\\', '/')
+                                    f.write(f"file '{abs_path}'\n")
+                        
+                        logger.info(f"[Render {task_id}] 创建concat列表: {list_file}")
+                        
+                        # 第三步：使用concat demuxer拼接并添加音频淡入淡出
+                        # 先使用 -c copy 快速拼接
+                        temp_output = os.path.join('renders', get_unique_filename('temp_concat') + '.mp4')
+                        temp_files_to_cleanup.append(temp_output)
+                        
+                        concat_cmd = [
+                            'ffmpeg', '-y',
+                            '-f', 'concat',
+                            '-safe', '0',
+                            '-i', list_file,
+                            '-c', 'copy',
+                            temp_output
+                        ]
+                        result = subprocess.run(concat_cmd, capture_output=True, text=True)
+                        if result.returncode != 0:
+                            logger.error(f"[Render {task_id}] 拼接失败: {result.stderr}")
+                            raise Exception(f'视频拼接失败: {result.stderr[:200]}')
+                        
+                        logger.info(f"[Render {task_id}] 快速拼接完成")
+                        
+                        # 直接复制到输出（暂时移除淡入淡出，避免音频问题）
+                        import shutil
+                        shutil.copy(temp_output, output_path)
+                        
+                        logger.info(f"[Render {task_id}] 拼接完成")
+                        
+                    finally:
+                        # 清理临时文件
+                        for temp_file in temp_files_to_cleanup:
+                            try:
+                                if os.path.exists(temp_file):
+                                    os.remove(temp_file)
+                                    logger.info(f"[Render {task_id}] 清理临时文件: {temp_file}")
+                            except Exception as e:
+                                logger.warning(f"[Render {task_id}] 清理临时文件失败: {temp_file}, {e}")
                 
-                render_tasks[task_id]['progress'] = 50
+                _update_render_task(task_id, progress=80)
                 
-                # 构建ffmpeg filter_complex
-                filter_parts = []
-                concat_parts = []
+                # 验证输出文件
+                if not os.path.exists(output_path):
+                    raise Exception('输出文件未生成')
                 
-                for i, (start, end) in enumerate(keep_segments):
-                    start_sec = start / 1000
-                    duration = (end - start) / 1000
-                    filter_parts.append(f"[0:v]trim=start={start_sec}:duration={duration},setpts=PTS-STARTPTS[v{i}];")
-                    filter_parts.append(f"[0:a]atrim=start={start_sec}:duration={duration},asetpts=PTS-STARTPTS[a{i}];")
-                    concat_parts.append(f"[v{i}][a{i}]")
-                
-                filter_complex = ''.join(filter_parts) + ''.join(concat_parts) + f"concat=n={len(keep_segments)}:v=1:a=1[outv][outa]"
-                
-                cmd = [
-                    'ffmpeg', '-y', '-i', local_video_path,
-                    '-filter_complex', filter_complex,
-                    '-map', '[outv]', '-map', '[outa]',
-                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                    '-c:a', 'aac', '-b:a', '128k',
-                    output_path
-                ]
-                
-                subprocess.run(cmd, check=True, capture_output=True)
-                
-                render_tasks[task_id]['progress'] = 80
+                output_size = os.path.getsize(output_path)
+                logger.info(f"[Render {task_id}] 输出文件大小: {output_size} bytes")
                 
                 # 上传到OSS
+                logger.info(f"[Render {task_id}] 开始上传OSS...")
                 oss_url = oss_client.upload_render(output_path, edit_id, user_id)
+                logger.info(f"[Render {task_id}] OSS上传完成: {oss_url[:80]}...")
                 
-                render_tasks[task_id]['progress'] = 100
-                render_tasks[task_id]['status'] = 'completed'
-                render_tasks[task_id]['output_url'] = oss_url
+                _update_render_task(task_id, progress=100, status='completed', output_url=oss_url)
                 
                 # 更新数据库（在新session中）
-                from extensions import db
-                from models import KaipaiEdit
                 with db.session.begin():
                     edit_update = KaipaiEdit.query.get(edit_id)
                     if edit_update:
                         edit_update.output_video_url = oss_url
                         edit_update.status = 'completed'
                 
-                # 清理临时文件
-                if os.path.exists(local_video_path) and 'temp_' in local_video_path:
-                    os.remove(local_video_path)
+                logger.info(f"[Render {task_id}] 任务完成")
                 
             except Exception as e:
-                render_tasks[task_id]['status'] = 'failed'
-                render_tasks[task_id]['error'] = str(e)
+                error_msg = str(e)
+                logger.error(f"[Render {task_id}] 任务失败: {error_msg}")
+                _update_render_task(task_id, status='failed', error=error_msg)
+                
                 # 更新数据库状态为失败
-                from extensions import db
-                from models import KaipaiEdit
-                with db.session.begin():
-                    edit_update = KaipaiEdit.query.get(edit_id)
-                    if edit_update:
-                        edit_update.status = 'failed'
+                try:
+                    with db.session.begin():
+                        edit_update = KaipaiEdit.query.get(edit_id)
+                        if edit_update:
+                            edit_update.status = 'failed'
+                except Exception as db_error:
+                    logger.error(f"[Render {task_id}] 更新数据库失败状态失败: {db_error}")
+            
+            finally:
+                # 清理下载的原始视频
+                if local_video_path and os.path.exists(local_video_path) and 'video_' in local_video_path:
+                    try:
+                        os.remove(local_video_path)
+                        logger.info(f"[Render {task_id}] 清理原始视频: {local_video_path}")
+                    except Exception as e:
+                        logger.warning(f"[Render {task_id}] 清理原始视频失败: {e}")
     
-    thread = threading.Thread(target=render_video)
-    thread.daemon = True
-    thread.start()
+    # 提交任务到线程池
+    render_executor.submit(render_video)
     
     edit.status = 'processing'
     db.session.commit()
@@ -528,14 +733,6 @@ def render_preview_video(edit_id):
     edit_params = json.loads(edit.edit_params) if edit.edit_params else {}
     removed_segments = edit_params.get('removed_segments', [])
     
-    if not removed_segments:
-        # 没有删除任何片段，直接返回原视频
-        return jsonify({
-            'edit_id': edit_id,
-            'video_url': edit.original_video_url,
-            'preview_rendered': False
-        })
-    
     # 获取所有需要在异步线程中使用的数据
     video_url = edit.original_video_url
     user_id = edit.user_id
@@ -543,13 +740,13 @@ def render_preview_video(edit_id):
     
     # 启动预览渲染任务（低质量，快速）
     task_id = str(uuid.uuid4())
-    render_tasks[task_id] = {
-        'status': 'processing',
+    _update_render_task(task_id, **{
+        'status': 'queued',
         'progress': 0,
         'output_url': None,
         'error': None,
         'is_preview': True
-    }
+    })
     
     # 获取当前应用实例
     from flask import current_app
@@ -557,85 +754,181 @@ def render_preview_video(edit_id):
     
     def render_preview():
         with app.app_context():
+            _update_render_task(task_id, status='processing', progress=5)
+            temp_files_to_cleanup = []
+            local_video_path = None
+            
             try:
-                render_tasks[task_id]['progress'] = 10
-                
-                all_segments = asr_result.get('sentences', [])
-                
-                removed_times = [(s['beginTime'], s['endTime']) for s in removed_segments]
-                
-                keep_segments = []
-                for seg in all_segments:
-                    seg_start = seg['beginTime']
-                    seg_end = seg['endTime']
-                    is_removed = any(r[0] <= seg_start and r[1] >= seg_end for r in removed_times)
-                    if not is_removed:
-                        keep_segments.append((seg_start, seg_end))
-                
-                render_tasks[task_id]['progress'] = 30
-                
-                # 下载原始视频
-                local_video_path = os.path.join('uploads', f'temp_preview_{edit_id}.mp4')
+                # 下载原始视频（使用唯一文件名）
+                local_video_path = os.path.join('uploads', get_unique_filename('preview_video'))
                 if video_url.startswith('http'):
                     import requests
-                    response = requests.get(video_url)
+                    logger.info(f"[Preview {task_id}] 下载视频: {video_url[:80]}...")
+                    response = requests.get(video_url, timeout=120)
+                    response.raise_for_status()
                     with open(local_video_path, 'wb') as f:
                         f.write(response.content)
+                    logger.info(f"[Preview {task_id}] 视频下载完成: {len(response.content)} bytes")
                 else:
                     local_video_path = video_url.lstrip('/')
+                    logger.info(f"[Preview {task_id}] 使用本地视频: {local_video_path}")
                 
-                render_tasks[task_id]['progress'] = 40
+                _update_render_task(task_id, progress=15)
+                
+                # 使用ffprobe获取视频实际时长
+                video_duration_ms = get_video_duration(local_video_path)
+                if video_duration_ms is None:
+                    video_duration_ms = asr_result.get('videoInfo', {}).get('duration', 0) * 1000
+                    logger.warning(f"[Preview {task_id}] 使用ASR时长: {video_duration_ms}ms")
+                else:
+                    logger.info(f"[Preview {task_id}] 视频实际时长: {video_duration_ms}ms")
+                
+                if video_duration_ms <= 0:
+                    raise Exception('无法获取视频时长')
+                
+                _update_render_task(task_id, progress=25)
+                
+                # 计算保留的时间段
+                keep_segments = calculate_keep_segments(removed_segments, video_duration_ms)
+                logger.info(f"[Preview {task_id}] 保留时间段: {keep_segments}")
+                
+                if len(keep_segments) == 0:
+                    raise Exception('没有可保留的视频片段')
+                
+                _update_render_task(task_id, progress=35)
                 
                 # 生成预览视频（低质量，快速）
                 output_filename = f"kaipai_preview_{edit_id}_{int(datetime.now().timestamp())}.mp4"
                 output_path = os.path.join('renders', output_filename)
                 
                 # 构建ffmpeg命令 - 预览版使用更低质量
-                filter_parts = []
-                concat_parts = []
+                if len(keep_segments) == 1:
+                    # 只有一段，直接裁剪
+                    start_sec = keep_segments[0][0] / 1000
+                    duration = (keep_segments[0][1] - keep_segments[0][0]) / 1000
+                    logger.info(f"[Preview {task_id}] 单段裁剪: {start_sec}s - {start_sec+duration}s")
+                    
+                    cmd = [
+                        'ffmpeg', '-y', '-i', local_video_path,
+                        '-ss', str(start_sec), '-t', str(duration),
+                        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+                        '-vf', 'scale=480:-2',
+                        '-c:a', 'aac', '-b:a', '96k',
+                        output_path
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        logger.error(f"[Preview {task_id}] FFmpeg错误: {result.stderr}")
+                        raise Exception(f'视频裁剪失败: {result.stderr[:200]}')
+                else:
+                    # 多段，先分割成临时文件，再用concat demuxer拼接
+                    logger.info(f"[Preview {task_id}] 多段拼接: {len(keep_segments)} 段")
+                    
+                    try:
+                        # 第一步：将每个时间段分割成临时文件
+                        for i, (start, end) in enumerate(keep_segments):
+                            start_sec = start / 1000
+                            duration = (end - start) / 1000
+                            temp_file = os.path.join('renders', get_unique_filename('preview_segment') + '.mp4')
+                            temp_files_to_cleanup.append(temp_file)
+                            
+                            logger.info(f"[Preview {task_id}] 分割段 {i+1}/{len(keep_segments)}: {start_sec}s - {start_sec+duration}s")
+                            
+                            segment_cmd = [
+                                'ffmpeg', '-y', '-i', local_video_path,
+                                '-ss', str(start_sec), '-t', str(duration),
+                                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+                                '-vf', 'scale=480:-2',
+                                '-c:a', 'aac', '-b:a', '96k',
+                                temp_file
+                            ]
+                            result = subprocess.run(segment_cmd, capture_output=True, text=True)
+                            if result.returncode != 0:
+                                logger.error(f"[Preview {task_id}] 分割段 {i+1} 失败: {result.stderr}")
+                                raise Exception(f'分割视频段失败: {result.stderr[:200]}')
+                        
+                        _update_render_task(task_id, progress=60)
+                        
+                        # 第二步：创建concat列表文件
+                        list_file = os.path.join('renders', get_unique_filename('preview_concat_list') + '.txt')
+                        temp_files_to_cleanup.append(list_file)
+                        
+                        with open(list_file, 'w') as f:
+                            for temp_file in temp_files_to_cleanup:
+                                if temp_file.endswith('.mp4'):
+                                    abs_path = os.path.abspath(temp_file).replace('\\', '/')
+                                    f.write(f"file '{abs_path}'\n")
+                        
+                        logger.info(f"[Preview {task_id}] 创建concat列表: {list_file}")
+                        
+                        # 第三步：使用concat demuxer拼接并添加音频淡入淡出
+                        temp_output = os.path.join('renders', get_unique_filename('preview_temp_concat') + '.mp4')
+                        temp_files_to_cleanup.append(temp_output)
+                        
+                        concat_cmd = [
+                            'ffmpeg', '-y',
+                            '-f', 'concat',
+                            '-safe', '0',
+                            '-i', list_file,
+                            '-c', 'copy',
+                            temp_output
+                        ]
+                        result = subprocess.run(concat_cmd, capture_output=True, text=True)
+                        if result.returncode != 0:
+                            logger.error(f"[Preview {task_id}] 拼接失败: {result.stderr}")
+                            raise Exception(f'视频拼接失败: {result.stderr[:200]}')
+                        
+                        logger.info(f"[Preview {task_id}] 快速拼接完成")
+                        
+                        # 直接复制到输出
+                        import shutil
+                        shutil.copy(temp_output, output_path)
+                        
+                        logger.info(f"[Preview {task_id}] 拼接完成")
+                        
+                    finally:
+                        # 清理临时文件
+                        for temp_file in temp_files_to_cleanup:
+                            try:
+                                if os.path.exists(temp_file):
+                                    os.remove(temp_file)
+                                    logger.info(f"[Preview {task_id}] 清理临时文件: {temp_file}")
+                            except Exception as e:
+                                logger.warning(f"[Preview {task_id}] 清理临时文件失败: {temp_file}, {e}")
                 
-                for i, (start, end) in enumerate(keep_segments):
-                    start_sec = start / 1000
-                    duration = (end - start) / 1000
-                    filter_parts.append(f"[0:v]trim=start={start_sec}:duration={duration},setpts=PTS-STARTPTS[v{i}];")
-                    filter_parts.append(f"[0:a]atrim=start={start_sec}:duration={duration},asetpts=PTS-STARTPTS[a{i}];")
-                    concat_parts.append(f"[v{i}][a{i}]")
+                _update_render_task(task_id, progress=80)
                 
-                filter_complex = ''.join(filter_parts) + ''.join(concat_parts) + f"concat=n={len(keep_segments)}:v=1:a=1[outv][outa]"
+                # 验证输出文件
+                if not os.path.exists(output_path):
+                    raise Exception('输出文件未生成')
                 
-                # 预览版使用更低分辨率和码率
-                cmd = [
-                    'ffmpeg', '-y', '-i', local_video_path,
-                    '-filter_complex', filter_complex,
-                    '-map', '[outv]', '-map', '[outa]',
-                    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
-                    '-vf', 'scale=480:-2',  # 降低分辨率
-                    '-c:a', 'aac', '-b:a', '96k',
-                    output_path
-                ]
-                
-                subprocess.run(cmd, check=True, capture_output=True)
-                
-                render_tasks[task_id]['progress'] = 80
+                output_size = os.path.getsize(output_path)
+                logger.info(f"[Preview {task_id}] 输出文件大小: {output_size} bytes")
                 
                 # 上传到OSS
+                logger.info(f"[Preview {task_id}] 开始上传OSS...")
                 oss_url = oss_client.upload_render(output_path, edit_id, user_id)
+                logger.info(f"[Preview {task_id}] OSS上传完成: {oss_url[:80]}...")
                 
-                render_tasks[task_id]['progress'] = 100
-                render_tasks[task_id]['status'] = 'completed'
-                render_tasks[task_id]['output_url'] = oss_url
-                
-                # 清理临时文件
-                if os.path.exists(local_video_path) and 'temp_' in local_video_path:
-                    os.remove(local_video_path)
+                _update_render_task(task_id, progress=100, status='completed', output_url=oss_url)
+                logger.info(f"[Preview {task_id}] 任务完成")
                 
             except Exception as e:
-                render_tasks[task_id]['status'] = 'failed'
-                render_tasks[task_id]['error'] = str(e)
+                error_msg = str(e)
+                logger.error(f"[Preview {task_id}] 任务失败: {error_msg}")
+                _update_render_task(task_id, status='failed', error=error_msg)
+            
+            finally:
+                # 清理下载的原始视频
+                if local_video_path and os.path.exists(local_video_path) and 'preview_video_' in local_video_path:
+                    try:
+                        os.remove(local_video_path)
+                        logger.info(f"[Preview {task_id}] 清理原始视频: {local_video_path}")
+                    except Exception as e:
+                        logger.warning(f"[Preview {task_id}] 清理原始视频失败: {e}")
     
-    thread = threading.Thread(target=render_preview)
-    thread.daemon = True
-    thread.start()
+    # 提交任务到线程池
+    render_executor.submit(render_preview)
     
     return jsonify({
         'edit_id': edit_id,

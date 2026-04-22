@@ -36,11 +36,11 @@ def format_time(ms: int) -> str:
     return f"{mins:02d}:{secs:02d}"
 
 
-def split_words_by_silence(words: List[Dict], min_split_gap: int = 100, silence_threshold: int = 300) -> List[Dict]:
+def split_words_by_silence(words: List[Dict], min_split_gap: int = 80, silence_threshold: int = 200) -> List[Dict]:
     """
     按字间静音分割words列表
-    - >100ms 分割成新短句
-    - >300ms 设为静音段
+    - >80ms 分割成新短句（降低阈值，更敏感）
+    - >200ms 设为静音段（降低阈值，检测更多静音）
     """
     if not words:
         return []

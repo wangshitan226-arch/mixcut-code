@@ -695,16 +695,48 @@ def start_render(edit_id):
 def get_render_status(task_id):
     """获取渲染任务状态"""
     task = render_tasks.get(task_id)
-    if not task:
-        return jsonify({'error': 'Task not found'}), 404
+    if task:
+        return jsonify({
+            'task_id': task_id,
+            'status': task['status'],
+            'progress': task['progress'],
+            'output_url': task.get('output_url'),
+            'error': task.get('error')
+        })
     
-    return jsonify({
-        'task_id': task_id,
-        'status': task['status'],
-        'progress': task['progress'],
-        'output_url': task.get('output_url'),
-        'error': task.get('error')
-    })
+    # 内存中找不到，尝试从数据库恢复（服务重启后）
+    # 从请求参数中获取 edit_id
+    edit_id = request.args.get('edit_id')
+    if edit_id:
+        edit = KaipaiEdit.query.get(edit_id)
+        if edit:
+            # 根据草稿状态返回相应信息
+            if edit.status == 'completed' and edit.output_video_url:
+                return jsonify({
+                    'task_id': task_id,
+                    'status': 'completed',
+                    'progress': 100,
+                    'output_url': edit.output_video_url,
+                    'error': None
+                })
+            elif edit.status == 'failed':
+                return jsonify({
+                    'task_id': task_id,
+                    'status': 'failed',
+                    'progress': 0,
+                    'output_url': None,
+                    'error': '渲染失败'
+                })
+            elif edit.status == 'processing':
+                return jsonify({
+                    'task_id': task_id,
+                    'status': 'processing',
+                    'progress': 50,
+                    'output_url': None,
+                    'error': None
+                })
+    
+    return jsonify({'error': 'Task not found'}), 404
 
 
 @kaipai_bp.route('/kaipai/<edit_id>/preview', methods=['GET'])
@@ -1036,3 +1068,544 @@ def delete_kaipai_edit(edit_id):
         import traceback
         traceback.print_exc()
         return jsonify({'error': f'删除失败: {str(e)}'}), 500
+
+
+# ==================== 模板相关API ====================
+
+@kaipai_bp.route('/kaipai/templates', methods=['GET'])
+def get_templates():
+    """获取系统预设模板列表"""
+    from models import Template
+    
+    category = request.args.get('category')
+    
+    query = Template.query.filter_by(is_active=True)
+    if category:
+        query = query.filter_by(category=category)
+    
+    templates = query.order_by(Template.sort_order).all()
+    
+    return jsonify({
+        'templates': [t.to_dict() for t in templates]
+    })
+
+
+@kaipai_bp.route('/kaipai/templates/<template_id>', methods=['GET'])
+def get_template(template_id):
+    """获取单个模板详情"""
+    from models import Template
+    
+    template = Template.query.get(template_id)
+    if not template:
+        return jsonify({'error': 'Template not found'}), 404
+    
+    return jsonify(template.to_dict())
+
+
+@kaipai_bp.route('/kaipai/<edit_id>/template', methods=['PUT'])
+def update_edit_template(edit_id):
+    """更新草稿选择的模板"""
+    edit = KaipaiEdit.query.get(edit_id)
+    if not edit:
+        return jsonify({'error': 'Edit not found'}), 404
+    
+    data = request.get_json(silent=True) or {}
+    template_id = data.get('template_id')
+    
+    # 如果template_id为null，表示取消选择模板
+    if template_id:
+        from models import Template
+        template = Template.query.get(template_id)
+        if not template:
+            return jsonify({'error': 'Template not found'}), 404
+        edit.template_id = template_id
+    else:
+        edit.template_id = None
+    
+    db.session.commit()
+    
+    return jsonify({
+        'edit_id': edit_id,
+        'template_id': edit.template_id,
+        'template': edit.template.to_dict() if edit.template else None
+    })
+
+
+@kaipai_bp.route('/kaipai/<edit_id>/export', methods=['POST'])
+def export_video(edit_id):
+    """
+    导出视频（支持模板渲染）
+    
+    流程：
+    1. 如果选择了模板：文字快剪拼接删除 + ICE模板渲染
+    2. 如果没有选择模板：仅文字快剪拼接删除
+    """
+    edit = KaipaiEdit.query.get(edit_id)
+    if not edit:
+        return jsonify({'error': 'Edit not found'}), 404
+    
+    # 获取编辑参数
+    edit_params = json.loads(edit.edit_params) if edit.edit_params else {}
+    removed_segments = edit_params.get('removed_segments', [])
+    removed_ids = [s['id'] for s in removed_segments]
+    
+    # 获取ASR结果
+    asr_result = json.loads(edit.asr_result) if edit.asr_result else {}
+    sentences = asr_result.get('sentences', [])
+    
+    if not sentences:
+        return jsonify({'error': 'No ASR data available'}), 400
+    
+    # 检查是否选择了模板
+    if edit.template_id:
+        # 有模板：提交ICE渲染任务
+        return _export_with_template(edit, sentences, removed_ids, asr_result, removed_segments)
+    else:
+        # 无模板：使用原有FFmpeg拼接逻辑
+        return _export_without_template(edit, removed_segments, asr_result)
+
+
+def _export_with_template(edit, sentences, removed_ids, asr_result, removed_segments):
+    """
+    使用模板导出（ICE渲染）
+    
+    流程：
+    1. 先做文字快剪（FFmpeg拼接删除）
+    2. 上传中间视频到OSS
+    3. 用中间视频作为输入，提交ICE模板渲染
+    """
+    from utils.ice_renderer import generate_ice_timeline, submit_ice_job, calculate_actual_duration
+    from models import Template
+    
+    template = Template.query.get(edit.template_id)
+    if not template:
+        return jsonify({'error': 'Template not found'}), 404
+    
+    template_config = json.loads(template.config) if template.config else {}
+    
+    # 创建任务
+    task_id = str(uuid.uuid4())
+    _update_render_task(task_id, **{
+        'status': 'processing',
+        'progress': 0,
+        'output_url': None,
+        'error': None,
+        'is_template': True
+    })
+    
+    edit.status = 'processing'
+    db.session.commit()
+    
+    from flask import current_app
+    app = current_app._get_current_object()
+    
+    def render_with_template():
+        """渲染任务（文字快剪 + ICE模板）"""
+        with app.app_context():
+            _render_with_template_impl(app, edit, sentences, removed_ids, removed_segments, template, template_config, task_id)
+    
+    def _render_with_template_impl(app, edit, sentences, removed_ids, removed_segments, template, template_config, task_id):
+        """实际的渲染实现（在应用上下文中运行）"""
+        temp_files_to_cleanup = []
+        intermediate_video_url = None
+        
+        try:
+            _update_render_task(task_id, progress=5)
+            
+            # ========== 第1步：文字快剪（FFmpeg拼接删除）==========
+            logger.info(f"[Task {task_id}] 开始文字快剪...")
+            
+            video_url = edit.original_video_url
+            user_id = edit.user_id
+            
+            # 下载原始视频
+            local_video_path = os.path.join('uploads', get_unique_filename('video'))
+            if video_url.startswith('http'):
+                import requests
+                logger.info(f"[Task {task_id}] 下载视频...")
+                response = requests.get(video_url, timeout=120)
+                response.raise_for_status()
+                with open(local_video_path, 'wb') as f:
+                    f.write(response.content)
+            else:
+                local_video_path = video_url.lstrip('/')
+            
+            _update_render_task(task_id, progress=15)
+            
+            # 获取视频时长
+            video_duration_ms = get_video_duration(local_video_path)
+            if video_duration_ms is None:
+                video_duration_ms = asr_result.get('videoInfo', {}).get('duration', 0) * 1000
+            
+            if video_duration_ms <= 0:
+                raise Exception('无法获取视频时长')
+            
+            _update_render_task(task_id, progress=25)
+            
+            # 计算保留时间段
+            keep_segments = calculate_keep_segments(removed_segments, video_duration_ms)
+            
+            if len(keep_segments) == 0:
+                raise Exception('没有可保留的视频片段')
+            
+            _update_render_task(task_id, progress=30)
+            
+            # 生成中间视频文件（文字快剪结果）
+            intermediate_filename = f"kaipai_intermediate_{edit.id}_{int(datetime.now().timestamp())}.mp4"
+            intermediate_path = os.path.join('renders', intermediate_filename)
+            temp_files_to_cleanup.append(intermediate_path)
+            
+            # 使用FFmpeg处理
+            if len(keep_segments) == 1:
+                # 单段裁剪
+                start_sec = keep_segments[0][0] / 1000
+                duration = (keep_segments[0][1] - keep_segments[0][0]) / 1000
+                
+                cmd = [
+                    'ffmpeg', '-y', '-i', local_video_path,
+                    '-ss', str(start_sec), '-t', str(duration),
+                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                    '-c:a', 'aac', '-b:a', '128k',
+                    intermediate_path
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise Exception(f'视频裁剪失败: {result.stderr[:200]}')
+            else:
+                # 多段拼接
+                segment_files = []
+                for i, (start, end) in enumerate(keep_segments):
+                    start_sec = start / 1000
+                    duration = (end - start) / 1000
+                    temp_file = os.path.join('renders', get_unique_filename('segment') + '.mp4')
+                    temp_files_to_cleanup.append(temp_file)
+                    segment_files.append(temp_file)
+                    
+                    segment_cmd = [
+                        'ffmpeg', '-y', '-i', local_video_path,
+                        '-ss', str(start_sec), '-t', str(duration),
+                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                        '-c:a', 'aac', '-b:a', '128k',
+                        temp_file
+                    ]
+                    result = subprocess.run(segment_cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        raise Exception(f'分割视频段失败: {result.stderr[:200]}')
+                
+                _update_render_task(task_id, progress=50)
+                
+                # 创建concat列表
+                list_file = os.path.join('renders', get_unique_filename('concat_list') + '.txt')
+                temp_files_to_cleanup.append(list_file)
+                
+                with open(list_file, 'w') as f:
+                    for temp_file in segment_files:
+                        abs_path = os.path.abspath(temp_file).replace('\\', '/')
+                        f.write(f"file '{abs_path}'\n")
+                
+                # 拼接
+                temp_output = os.path.join('renders', get_unique_filename('temp_concat') + '.mp4')
+                temp_files_to_cleanup.append(temp_output)
+                
+                concat_cmd = [
+                    'ffmpeg', '-y',
+                    '-f', 'concat',
+                    '-safe', '0',
+                    '-i', list_file,
+                    '-c', 'copy',
+                    temp_output
+                ]
+                result = subprocess.run(concat_cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise Exception(f'视频拼接失败: {result.stderr[:200]}')
+                
+                import shutil
+                shutil.copy(temp_output, intermediate_path)
+            
+            _update_render_task(task_id, progress=60)
+            
+            # 上传中间视频到OSS
+            logger.info(f"[Task {task_id}] 上传中间视频到OSS...")
+            intermediate_video_url = oss_client.upload_render(intermediate_path, f"intermediate_{edit.id}", user_id)
+            
+            _update_render_task(task_id, progress=70)
+            
+            # ========== 第2步：ICE模板渲染 ==========
+            logger.info(f"[Task {task_id}] 开始ICE模板渲染...")
+            
+            # 生成ICE Timeline（使用中间视频作为输入）
+            timeline = generate_ice_timeline(
+                video_url=intermediate_video_url,  # 使用文字快剪后的视频
+                sentences=sentences,
+                removed_segment_ids=removed_ids,  # 字幕数据仍然需要，用于生成字幕clips
+                template_config=template_config,
+                video_duration_ms=calculate_actual_duration([s for s in sentences if s['id'] not in removed_ids])
+            )
+            
+            # 提交ICE任务
+            output_filename = f"kaipai_template_{edit.id}_{int(datetime.now().timestamp())}.mp4"
+            job_id, output_url = submit_ice_job(timeline, user_id, output_filename)
+            
+            _update_render_task(task_id, progress=80, ice_job_id=job_id)
+            
+            # 轮询ICE任务状态
+            from utils.ice_renderer import get_job_status
+            import time
+            
+            while True:
+                try:
+                    status = get_job_status(job_id)
+                    
+                    if status == 'Success':
+                        _update_render_task(task_id, status='completed', progress=100, output_url=output_url)
+                        with db.session.begin():
+                            edit_update = KaipaiEdit.query.get(edit.id)
+                            if edit_update:
+                                edit_update.output_video_url = output_url
+                                edit_update.status = 'completed'
+                        break
+                    elif status == 'Failed':
+                        _update_render_task(task_id, status='failed', error='ICE render failed')
+                        with db.session.begin():
+                            edit_update = KaipaiEdit.query.get(edit.id)
+                            if edit_update:
+                                edit_update.status = 'failed'
+                        break
+                    else:
+                        # 更新进度（80-95%）
+                        current_progress = render_tasks.get(task_id, {}).get('progress', 80)
+                        new_progress = min(95, current_progress + 3)
+                        _update_render_task(task_id, progress=new_progress)
+                    
+                    time.sleep(5)
+                    
+                except Exception as e:
+                    logger.error(f"[Task {task_id}] 轮询ICE状态失败: {e}")
+                    time.sleep(10)
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"[Task {task_id}] 渲染失败: {error_msg}")
+            _update_render_task(task_id, status='failed', error=error_msg)
+            
+            try:
+                with db.session.begin():
+                    edit_update = KaipaiEdit.query.get(edit.id)
+                    if edit_update:
+                        edit_update.status = 'failed'
+            except Exception:
+                pass
+        
+        finally:
+            # 清理临时文件
+            for temp_file in temp_files_to_cleanup:
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                except Exception:
+                    pass
+            
+            if local_video_path and os.path.exists(local_video_path) and 'video_' in local_video_path:
+                try:
+                    os.remove(local_video_path)
+                except Exception:
+                    pass
+    
+    # 提交渲染任务
+    render_executor.submit(render_with_template)
+    
+    return jsonify({
+        'edit_id': edit.id,
+        'status': 'processing',
+        'task_id': task_id,
+        'use_template': True,
+        'template_name': template.name,
+        'message': '开始渲染：文字快剪 + 模板渲染'
+    })
+
+
+def _export_without_template(edit, removed_segments, asr_result):
+    """不使用模板导出（原有FFmpeg逻辑）"""
+    # 复用原有的render逻辑
+    video_url = edit.original_video_url
+    user_id = edit.user_id
+    edit_id = edit.id
+    
+    # 创建任务
+    task_id = str(uuid.uuid4())
+    _update_render_task(task_id, **{
+        'status': 'queued',
+        'progress': 0,
+        'output_url': None,
+        'error': None,
+        'is_template': False
+    })
+    
+    from flask import current_app
+    app = current_app._get_current_object()
+    
+    def render_video():
+        """视频渲染任务"""
+        with app.app_context():
+            temp_files_to_cleanup = []
+            local_video_path = None
+            
+            try:
+                _update_render_task(task_id, status='processing', progress=5)
+                
+                # 下载原始视频
+                local_video_path = os.path.join('uploads', get_unique_filename('video'))
+                if video_url.startswith('http'):
+                    import requests
+                    logger.info(f"[Render {task_id}] 下载视频...")
+                    response = requests.get(video_url, timeout=120)
+                    response.raise_for_status()
+                    with open(local_video_path, 'wb') as f:
+                        f.write(response.content)
+                else:
+                    local_video_path = video_url.lstrip('/')
+                
+                _update_render_task(task_id, progress=15)
+                
+                # 获取视频时长
+                video_duration_ms = get_video_duration(local_video_path)
+                if video_duration_ms is None:
+                    video_duration_ms = asr_result.get('videoInfo', {}).get('duration', 0) * 1000
+                
+                if video_duration_ms <= 0:
+                    raise Exception('无法获取视频时长')
+                
+                _update_render_task(task_id, progress=25)
+                
+                # 计算保留时间段
+                keep_segments = calculate_keep_segments(removed_segments, video_duration_ms)
+                
+                if len(keep_segments) == 0:
+                    raise Exception('没有可保留的视频片段')
+                
+                _update_render_task(task_id, progress=30)
+                
+                # 生成输出文件
+                output_filename = f"kaipai_render_{edit_id}_{int(datetime.now().timestamp())}.mp4"
+                output_path = os.path.join('renders', output_filename)
+                
+                # 使用FFmpeg处理
+                if len(keep_segments) == 1:
+                    # 单段裁剪
+                    start_sec = keep_segments[0][0] / 1000
+                    duration = (keep_segments[0][1] - keep_segments[0][0]) / 1000
+                    
+                    cmd = [
+                        'ffmpeg', '-y', '-i', local_video_path,
+                        '-ss', str(start_sec), '-t', str(duration),
+                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                        '-c:a', 'aac', '-b:a', '128k',
+                        output_path
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        raise Exception(f'视频裁剪失败: {result.stderr[:200]}')
+                else:
+                    # 多段拼接
+                    for i, (start, end) in enumerate(keep_segments):
+                        start_sec = start / 1000
+                        duration = (end - start) / 1000
+                        temp_file = os.path.join('renders', get_unique_filename('segment') + '.mp4')
+                        temp_files_to_cleanup.append(temp_file)
+                        
+                        segment_cmd = [
+                            'ffmpeg', '-y', '-i', local_video_path,
+                            '-ss', str(start_sec), '-t', str(duration),
+                            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                            '-c:a', 'aac', '-b:a', '128k',
+                            temp_file
+                        ]
+                        result = subprocess.run(segment_cmd, capture_output=True, text=True)
+                        if result.returncode != 0:
+                            raise Exception(f'分割视频段失败: {result.stderr[:200]}')
+                    
+                    _update_render_task(task_id, progress=60)
+                    
+                    # 创建concat列表
+                    list_file = os.path.join('renders', get_unique_filename('concat_list') + '.txt')
+                    temp_files_to_cleanup.append(list_file)
+                    
+                    with open(list_file, 'w') as f:
+                        for temp_file in temp_files_to_cleanup:
+                            if temp_file.endswith('.mp4'):
+                                abs_path = os.path.abspath(temp_file).replace('\\', '/')
+                                f.write(f"file '{abs_path}'\n")
+                    
+                    # 拼接
+                    temp_output = os.path.join('renders', get_unique_filename('temp_concat') + '.mp4')
+                    temp_files_to_cleanup.append(temp_output)
+                    
+                    concat_cmd = [
+                        'ffmpeg', '-y',
+                        '-f', 'concat',
+                        '-safe', '0',
+                        '-i', list_file,
+                        '-c', 'copy',
+                        temp_output
+                    ]
+                    result = subprocess.run(concat_cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        raise Exception(f'视频拼接失败: {result.stderr[:200]}')
+                    
+                    import shutil
+                    shutil.copy(temp_output, output_path)
+                
+                _update_render_task(task_id, progress=80)
+                
+                # 上传OSS
+                oss_url = oss_client.upload_render(output_path, edit_id, user_id)
+                
+                _update_render_task(task_id, progress=100, status='completed', output_url=oss_url)
+                
+                # 更新数据库
+                with db.session.begin():
+                    edit_update = KaipaiEdit.query.get(edit_id)
+                    if edit_update:
+                        edit_update.output_video_url = oss_url
+                        edit_update.status = 'completed'
+                
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"[Render {task_id}] 任务失败: {error_msg}")
+                _update_render_task(task_id, status='failed', error=error_msg)
+                
+                try:
+                    with db.session.begin():
+                        edit_update = KaipaiEdit.query.get(edit_id)
+                        if edit_update:
+                            edit_update.status = 'failed'
+                except Exception:
+                    pass
+            
+            finally:
+                # 清理临时文件
+                for temp_file in temp_files_to_cleanup:
+                    try:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                    except Exception:
+                        pass
+                
+                if local_video_path and os.path.exists(local_video_path) and 'video_' in local_video_path:
+                    try:
+                        os.remove(local_video_path)
+                    except Exception:
+                        pass
+    
+    # 提交任务
+    render_executor.submit(render_video)
+    
+    edit.status = 'processing'
+    db.session.commit()
+    
+    return jsonify({
+        'edit_id': edit_id,
+        'status': 'processing',
+        'task_id': task_id,
+        'use_template': False
+    })

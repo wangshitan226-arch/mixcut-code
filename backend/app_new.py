@@ -128,7 +128,10 @@ def create_app():
     ensure_directories()
     
     # Register blueprints
+    # 注意：kaipai_bp 有 /users/<user_id>/kaipai/drafts 路由
+    # 必须在 users_bp (/users/<user_id>) 之前注册，否则会被截获
     app.register_blueprint(auth_bp)
+    app.register_blueprint(kaipai_bp)
     app.register_blueprint(users_bp)
     app.register_blueprint(shots_bp)
     app.register_blueprint(materials_bp)
@@ -136,7 +139,12 @@ def create_app():
     app.register_blueprint(generate_bp)
     app.register_blueprint(renders_bp)
     app.register_blueprint(static_bp)
-    app.register_blueprint(kaipai_bp)
+    
+    # Debug: 打印所有路由
+    print("Registered routes:")
+    for rule in app.url_map.iter_rules():
+        if 'kaipai' in rule.endpoint:
+            print(f"  {rule.rule} -> {rule.endpoint}")
     
     # Create tables
     with app.app_context():

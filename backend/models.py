@@ -100,6 +100,44 @@ class Render(db.Model):
     created_at = db.Column(db.DateTime, default=db.func.now())
 
 
+class Template(db.Model):
+    """Video Template model - 视频模板（仅系统预设）"""
+    __tablename__ = 'templates'
+    
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text)
+    category = db.Column(db.String(50), nullable=False)  # ecommerce, knowledge, emotion, product, entertainment
+    
+    # 模板配置（JSON格式）
+    config = db.Column(db.Text, nullable=False)  # JSON: {subtitleStyles, videoEffects, backgroundMusic}
+    
+    # 预览图
+    preview_url = db.Column(db.String(500))
+    
+    # 状态
+    is_active = db.Column(db.Boolean, default=True)
+    sort_order = db.Column(db.Integer, default=0)  # 排序
+    
+    # 时间戳
+    created_at = db.Column(db.DateTime, default=db.func.now())
+    updated_at = db.Column(db.DateTime, default=db.func.now(), onupdate=db.func.now())
+    
+    def to_dict(self):
+        import json
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'category': self.category,
+            'config': json.loads(self.config) if self.config else None,
+            'preview_url': self.preview_url,
+            'is_active': self.is_active,
+            'sort_order': self.sort_order,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
 class KaipaiEdit(db.Model):
     """Kaipai editing task model - 开拍式剪辑任务/草稿"""
     __tablename__ = 'kaipai_edits'
@@ -133,6 +171,9 @@ class KaipaiEdit(db.Model):
     # 草稿标题
     title = db.Column(db.String(200), nullable=True)
     
+    # 选择的模板（可选）
+    template_id = db.Column(db.String(36), db.ForeignKey('templates.id'), nullable=True)
+    
     # 时间戳
     created_at = db.Column(db.DateTime, default=db.func.now())
     updated_at = db.Column(db.DateTime, default=db.func.now(), onupdate=db.func.now())
@@ -140,6 +181,7 @@ class KaipaiEdit(db.Model):
     # 关联
     render = db.relationship('Render', backref='kaipai_edits', lazy=True)
     user = db.relationship('User', backref='kaipai_edits', lazy=True)
+    template = db.relationship('Template', backref='kaipai_edits', lazy=True)
     
     def to_dict(self):
         import json
@@ -158,6 +200,8 @@ class KaipaiEdit(db.Model):
             'edit_params': json.loads(self.edit_params) if self.edit_params else None,
             'edit_history': json.loads(self.edit_history) if self.edit_history else [],
             'status': self.status,
+            'template_id': self.template_id,
+            'template': self.template.to_dict() if self.template else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }

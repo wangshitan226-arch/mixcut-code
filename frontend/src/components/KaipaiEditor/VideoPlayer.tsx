@@ -216,8 +216,7 @@ export default function VideoPlayer({
 
   return (
     <div
-      className="shrink-0 bg-gray-100 flex items-center justify-center overflow-hidden"
-      style={{ height: '30vh' }}
+      className="shrink-0 bg-gray-100 flex items-center justify-center overflow-hidden flex-1"
     >
       <div className="relative h-full aspect-[9/16] bg-black shadow-lg rounded-sm overflow-hidden">
         {videoUrl && (

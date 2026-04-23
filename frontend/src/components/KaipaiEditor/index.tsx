@@ -11,6 +11,8 @@ import {
   AlertCircle,
   Undo2,
   Download,
+  LayoutTemplate,
+  X,
 } from 'lucide-react';
 import SegmentItem from './SegmentItem';
 import EditModal from './EditModal';
@@ -18,6 +20,15 @@ import VideoPlayer from './VideoPlayer';
 import type { Segment } from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+
+// 模板类型定义
+interface Template {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  preview_url?: string;
+}
 
 interface KaipaiEditorProps {
   editId: string;
@@ -47,6 +58,14 @@ export default function KaipaiEditor({
   // 编辑弹窗状态
   const [editingSegment, setEditingSegment] = useState<Segment | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+
+  // 模板相关状态
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<Template | null>(null);
+  const [loadingTemplates, setLoadingTemplates] = useState(false);
+  
+  // 当前激活的标签页: 'edit' | 'template'
+  const [activeTab, setActiveTab] = useState<'edit' | 'template'>('edit');
 
   // 原始视频URL（从草稿获取）
   const [originalVideoUrl, setOriginalVideoUrl] = useState<string>('');
@@ -118,6 +137,11 @@ export default function KaipaiEditor({
 
           if (draftData.output_video_url) {
             setOutputUrl(draftData.output_video_url);
+          }
+
+          // 恢复已选择的模板
+          if (draftData.template) {
+            setSelectedTemplate(draftData.template);
           }
 
           return;
@@ -506,7 +530,54 @@ export default function KaipaiEditor({
     }
   }, [editId]);
 
-  // 导出最终视频
+  // 加载模板列表
+  const loadTemplates = useCallback(async () => {
+    if (templates.length > 0) return; // 已加载过
+    setLoadingTemplates(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/kaipai/templates`);
+      if (response.ok) {
+        const data = await response.json();
+        setTemplates(data.templates || []);
+      }
+    } catch (err) {
+      console.error('加载模板失败:', err);
+    } finally {
+      setLoadingTemplates(false);
+    }
+  }, [templates.length]);
+
+  // 切换到模板标签时加载模板
+  useEffect(() => {
+    if (activeTab === 'template') {
+      loadTemplates();
+    }
+  }, [activeTab, loadTemplates]);
+
+  // 选择模板
+  const selectTemplate = useCallback(async (template: Template | null) => {
+    try {
+      // 保存到后端
+      const response = await fetch(`${API_BASE_URL}/api/kaipai/${editId}/template`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          template_id: template?.id || null
+        }),
+      });
+
+      if (response.ok) {
+        setSelectedTemplate(template);
+      } else {
+        alert('选择模板失败');
+      }
+    } catch (err) {
+      console.error('选择模板失败:', err);
+      alert('选择模板失败');
+    }
+  }, [editId]);
+
+  // 导出最终视频（使用新的export接口）
   const exportVideo = useCallback(async () => {
     if (segments.length === 0) {
       alert('没有可导出的内容');
@@ -518,7 +589,7 @@ export default function KaipaiEditor({
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/api/kaipai/${editId}/render`,
+        `${API_BASE_URL}/api/kaipai/${editId}/export`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -530,7 +601,7 @@ export default function KaipaiEditor({
 
       const checkStatus = setInterval(async () => {
         const statusResponse = await fetch(
-          `${API_BASE_URL}/api/kaipai/render/${taskId}/status`
+          `${API_BASE_URL}/api/kaipai/render/${taskId}/status?edit_id=${editId}`
         );
         const statusData = await statusResponse.json();
 
@@ -633,25 +704,27 @@ export default function KaipaiEditor({
         </div>
       </header>
 
-      {/* Video Player */}
-      <VideoPlayer
-        videoUrl={originalVideoUrl}
-        currentTime={currentTime}
-        isPlaying={isPlaying}
-        subtitle={currentSubtitle}
-        progressPercent={progressPercent}
-        totalDuration={totalDuration}
-        allAsrSegments={allAsrSegments}
-        removedIds={removedIds}
-        onTogglePlay={togglePlay}
-        onTimeUpdate={handleTimeUpdate}
-        onEnded={handleVideoEnded}
-        onSeek={jumpToTime}
-        onSubtitleChange={handleSubtitleChange}
-      />
+      {/* 主内容区 - 视频预览 */}
+      <div className="flex-1 flex flex-col min-h-0">
+        <VideoPlayer
+          videoUrl={originalVideoUrl}
+          currentTime={currentTime}
+          isPlaying={isPlaying}
+          subtitle={currentSubtitle}
+          progressPercent={progressPercent}
+          totalDuration={totalDuration}
+          allAsrSegments={allAsrSegments}
+          removedIds={removedIds}
+          onTogglePlay={togglePlay}
+          onTimeUpdate={handleTimeUpdate}
+          onEnded={handleVideoEnded}
+          onSeek={jumpToTime}
+          onSubtitleChange={handleSubtitleChange}
+        />
+      </div>
 
       {/* 操作栏 */}
-      <div className="bg-white border-b border-gray-100 px-4 py-2 flex items-center justify-between">
+      <div className="bg-white border-t border-gray-100 px-4 py-2 flex items-center justify-between shrink-0">
         <div className="text-sm text-gray-600">
           {isExporting ? (
             <span className="flex items-center gap-2">
@@ -665,23 +738,36 @@ export default function KaipaiEditor({
             </span>
           )}
         </div>
-        <button
-          onClick={exportVideo}
-          disabled={isExporting || segments.length === 0}
-          className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium ${
-            segments.length > 0 && !isExporting
-              ? 'bg-green-600 text-white'
-              : 'bg-gray-200 text-gray-400'
-          }`}
-        >
-          <Download size={14} />
-          导出视频
-        </button>
+        <div className="flex items-center gap-2">
+          {/* 单个切换按钮 */}
+          <button
+            onClick={() => setActiveTab(activeTab === 'edit' ? 'template' : 'edit')}
+            className={`px-4 py-1.5 rounded-full text-xs font-medium transition-all ${
+              activeTab === 'template'
+                ? 'bg-purple-600 text-white'
+                : 'bg-blue-600 text-white'
+            }`}
+          >
+            {activeTab === 'edit' ? '网感模板' : '文字快剪'}
+          </button>
+          <button
+            onClick={exportVideo}
+            disabled={isExporting || segments.length === 0}
+            className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium ${
+              segments.length > 0 && !isExporting
+                ? 'bg-green-600 text-white'
+                : 'bg-gray-200 text-gray-400'
+            }`}
+          >
+            <Download size={14} />
+            导出
+          </button>
+        </div>
       </div>
 
       {/* 输出视频链接 */}
       {outputUrl && (
-        <div className="bg-green-50 border-b border-green-100 px-4 py-2 flex items-center justify-between">
+        <div className="bg-green-50 border-t border-green-100 px-4 py-2 flex items-center justify-between shrink-0">
           <span className="text-sm text-green-700">视频已导出</span>
           <a
             href={outputUrl}
@@ -694,107 +780,173 @@ export default function KaipaiEditor({
         </div>
       )}
 
-      {/* Segments List */}
-      <div className="flex-1 bg-gray-50 rounded-t-[24px] relative flex flex-col overflow-hidden border-t border-gray-200/50">
-        {loading ? (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
-            <div className="flex gap-2 items-end h-16 mb-4">
-              {[...Array(12)].map((_, i) => (
-                <motion.div
-                  key={i}
-                  animate={{ height: [8, 48, 12, 36, 8] }}
-                  transition={{
-                    repeat: Infinity,
-                    duration: 1,
-                    delay: i * 0.08,
-                  }}
-                  className="w-1.5 bg-blue-500 rounded-full"
-                />
-              ))}
-            </div>
-            <h3 className="text-gray-800 text-lg font-bold">{loadingText}</h3>
-            {error && (
-              <div className="mt-4 flex items-center gap-2 text-red-500 text-sm">
-                <AlertCircle size={16} />
-                <span>{error}</span>
-              </div>
-            )}
-          </div>
-        ) : error ? (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
-            <AlertCircle size={48} className="text-red-400 mb-4" />
-            <h3 className="text-gray-800 text-lg font-bold mb-2">出错了</h3>
-            <p className="text-gray-500 text-sm">{error}</p>
-            <button
-              onClick={onBack}
-              className="mt-4 px-6 py-2 bg-gray-100 text-gray-700 rounded-full text-sm font-medium"
-            >
-              返回
-            </button>
-          </div>
-        ) : (
+      {/* 下栏区域 - 动态高度 */}
+      <div 
+        className={`bg-gray-50 relative flex flex-col overflow-hidden border-t border-gray-200/50 transition-all duration-300 shrink-0 ${
+          activeTab === 'template' ? 'h-[180px]' : 'h-[45%] min-h-[300px]'
+        }`}
+      >
+        {/* 文字快剪内容 */}
+        {activeTab === 'edit' && (
           <>
-            {/* Toolbar */}
-            <div className="px-4 py-3 bg-white border-b border-gray-100 flex items-center justify-between">
-              <div>
-                <p className="text-gray-800 text-sm font-bold">文字快剪</p>
-                <p className="text-gray-400 text-[10px]">
-                  选中 {selectedCount} 段，点击删除按钮删除
-                </p>
+            {loading ? (
+              <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+                <div className="flex gap-2 items-end h-16 mb-4">
+                  {[...Array(12)].map((_, i) => (
+                    <motion.div
+                      key={i}
+                      animate={{ height: [8, 48, 12, 36, 8] }}
+                      transition={{
+                        repeat: Infinity,
+                        duration: 1,
+                        delay: i * 0.08,
+                      }}
+                      className="w-1.5 bg-blue-500 rounded-full"
+                    />
+                  ))}
+                </div>
+                <h3 className="text-gray-800 text-lg font-bold">{loadingText}</h3>
+                {error && (
+                  <div className="mt-4 flex items-center gap-2 text-red-500 text-sm">
+                    <AlertCircle size={16} />
+                    <span>{error}</span>
+                  </div>
+                )}
               </div>
-              <button
-                onClick={clearSelection}
-                className="text-gray-500 text-xs flex items-center gap-1 bg-gray-100 px-3 py-1.5 rounded-full"
-              >
-                <RotateCcw size={14} /> 清除选中
-              </button>
-            </div>
+            ) : error ? (
+              <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+                <AlertCircle size={48} className="text-red-400 mb-4" />
+                <h3 className="text-gray-800 text-lg font-bold mb-2">出错了</h3>
+                <p className="text-gray-500 text-sm">{error}</p>
+                <button
+                  onClick={onBack}
+                  className="mt-4 px-6 py-2 bg-gray-100 text-gray-700 rounded-full text-sm font-medium"
+                >
+                  返回
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Toolbar - 简化版 */}
+                <div className="px-4 py-2 bg-white border-b border-gray-100 flex items-center justify-between">
+                  <p className="text-gray-400 text-[10px]">
+                    选中 {selectedCount} 段
+                  </p>
+                  <button
+                    onClick={clearSelection}
+                    className="text-gray-500 text-xs flex items-center gap-1 bg-gray-100 px-3 py-1.5 rounded-full"
+                  >
+                    <RotateCcw size={14} /> 清除选中
+                  </button>
+                </div>
 
-            {/* Segments */}
-            <div className="flex-1 overflow-y-auto px-4 py-4 scrollbar-hide pb-32">
-              {segments.map((segment) => (
-                <SegmentItem
-                  key={segment.id}
-                  segment={segment}
-                  isSelected={!!segment.selected}
-                  onToggle={toggleSelect}
-                  onJump={jumpToTime}
-                  onEdit={handleEditSegment}
-                  onToggleExpand={toggleExpand}
-                  onWordEdit={editWord}
-                />
-              ))}
-            </div>
+                {/* Segments */}
+                <div className="flex-1 overflow-y-auto px-4 py-4 scrollbar-hide pb-28">
+                  {segments.map((segment) => (
+                    <SegmentItem
+                      key={segment.id}
+                      segment={segment}
+                      isSelected={!!segment.selected}
+                      onToggle={toggleSelect}
+                      onJump={jumpToTime}
+                      onEdit={handleEditSegment}
+                      onToggleExpand={toggleExpand}
+                      onWordEdit={editWord}
+                    />
+                  ))}
+                </div>
 
-            {/* Bottom Actions */}
-            <div className="absolute bottom-4 inset-x-4 flex items-stretch gap-2">
-              <button
-                onClick={selectAllSilence}
-                className="flex-1 bg-white border border-gray-200 rounded-xl py-3 flex flex-col items-center gap-1 hover:bg-gray-50"
-              >
-                <VolumeX size={18} className="text-gray-500" />
-                <span className="text-[10px] text-gray-600">选静音</span>
-              </button>
-              <button
-                onClick={selectAllWithFiller}
-                className="flex-1 bg-white border border-gray-200 rounded-xl py-3 flex flex-col items-center gap-1 hover:bg-gray-50"
-              >
-                <Zap size={18} className="text-gray-500" />
-                <span className="text-[10px] text-gray-600">选语气词</span>
-              </button>
-              <button
-                onClick={deleteSelected}
-                disabled={selectedCount === 0}
-                className={`flex-[2] rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${
-                  selectedCount > 0
-                    ? 'bg-red-600 text-white'
-                    : 'bg-gray-200 text-gray-400'
-                }`}
-              >
-                <Trash2 size={18} /> 删除 ({selectedCount})
-              </button>
-            </div>
+                {/* Bottom Actions */}
+                <div className="absolute bottom-0 left-0 right-0 bg-white border-t border-gray-100 px-4 py-3 flex items-stretch gap-2">
+                  <button
+                    onClick={selectAllSilence}
+                    className="flex-1 bg-gray-50 border border-gray-200 rounded-xl py-2.5 flex flex-col items-center gap-0.5 hover:bg-gray-100"
+                  >
+                    <VolumeX size={16} className="text-gray-500" />
+                    <span className="text-[10px] text-gray-600">选静音</span>
+                  </button>
+                  <button
+                    onClick={selectAllWithFiller}
+                    className="flex-1 bg-gray-50 border border-gray-200 rounded-xl py-2.5 flex flex-col items-center gap-0.5 hover:bg-gray-100"
+                  >
+                    <Zap size={16} className="text-gray-500" />
+                    <span className="text-[10px] text-gray-600">选语气词</span>
+                  </button>
+                  <button
+                    onClick={deleteSelected}
+                    disabled={selectedCount === 0}
+                    className={`flex-[2] rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${
+                      selectedCount > 0
+                        ? 'bg-red-600 text-white'
+                        : 'bg-gray-200 text-gray-400'
+                    }`}
+                  >
+                    <Trash2 size={16} /> 删除 ({selectedCount})
+                  </button>
+                </div>
+              </>
+            )}
           </>
+        )}
+
+        {/* 网感模板内容 */}
+        {activeTab === 'template' && (
+          <div className="flex-1 flex flex-col">
+            {/* 模板列表 - 横向滑动 */}
+            <div className="flex-1 overflow-x-auto overflow-y-hidden py-4 px-4">
+              {loadingTemplates ? (
+                <div className="flex items-center justify-center h-full">
+                  <Loader2 size={24} className="animate-spin text-blue-500" />
+                </div>
+              ) : (
+                <div className="flex gap-4 h-full items-center">
+                  {/* 模板封面列表 */}
+                  {templates.map((template) => (
+                    <button
+                      key={template.id}
+                      onClick={() => selectTemplate(template)}
+                      className={`relative shrink-0 w-[100px] flex flex-col items-center gap-2 transition-all ${
+                        selectedTemplate?.id === template.id ? 'scale-105' : ''
+                      }`}
+                    >
+                      {/* 封面图 - 占满整个框 */}
+                      <div 
+                        className={`w-[100px] h-[130px] rounded-xl overflow-hidden border-2 transition-all ${
+                          selectedTemplate?.id === template.id
+                            ? 'border-purple-500 shadow-lg'
+                            : 'border-gray-200'
+                        }`}
+                      >
+                        {template.preview_url ? (
+                          <img 
+                            src={template.preview_url} 
+                            alt={template.name}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-purple-100 to-blue-100 flex items-center justify-center">
+                            <LayoutTemplate size={32} className="text-purple-300" />
+                          </div>
+                        )}
+                      </div>
+                      {/* 模板名称 - 下方 */}
+                      <span className={`text-[11px] text-center font-medium leading-tight ${
+                        selectedTemplate?.id === template.id ? 'text-purple-600' : 'text-gray-700'
+                      }`}>
+                        {template.name}
+                      </span>
+                      {/* 选中标记 */}
+                      {selectedTemplate?.id === template.id && (
+                        <div className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-purple-500 flex items-center justify-center shadow-md">
+                          <Check size={12} className="text-white" />
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
 

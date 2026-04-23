@@ -33,7 +33,7 @@ RENDER_MAX_AGE_HOURS = 24
 # ==================== OSS配置 ====================
 OSS_CONFIG = {
     # 阿里云OSS配置
-    # 建议使用环境变量，但这里直接配置以便快速启动
+    # 请设置环境变量 OSS_ACCESS_KEY_ID 和 OSS_ACCESS_KEY_SECRET
     'access_key_id': os.environ.get('OSS_ACCESS_KEY_ID', ''),
     'access_key_secret': os.environ.get('OSS_ACCESS_KEY_SECRET', ''),
     'endpoint': 'oss-cn-beijing.aliyuncs.com',  # 华北2(北京)
@@ -43,6 +43,18 @@ OSS_CONFIG = {
 
 # 是否启用OSS
 OSS_ENABLED = bool(OSS_CONFIG['access_key_id'] and OSS_CONFIG['access_key_secret'])
+
+# ==================== 阿里云ICE配置 ====================
+ICE_CONFIG = {
+    # 阿里云ICE（智能媒体服务）配置
+    # 用于模板渲染
+    'access_key_id': os.environ.get('ICE_ACCESS_KEY_ID', OSS_CONFIG['access_key_id']),
+    'access_key_secret': os.environ.get('ICE_ACCESS_KEY_SECRET', OSS_CONFIG['access_key_secret']),
+    'region': 'cn-beijing',  # 服务所在地域
+}
+
+# 是否启用ICE模板渲染
+ICE_ENABLED = bool(ICE_CONFIG['access_key_id'] and ICE_CONFIG['access_key_secret'])
 
 
 def ensure_directories():

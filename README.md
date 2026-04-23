@@ -224,6 +224,156 @@ combinations = list(itertools.product(*shot_materials))
 - 生成的视频保存在 `backend/renders/` 目录
 - 数据库使用 SQLite，保存在 `backend/instance/mixcut_refactored.db`
 
+## 服务器部署配置
+
+### 环境变量配置（重要）
+
+部署到服务器时，需要配置以下环境变量或修改配置文件：
+
+#### 1. 前端 API 地址配置
+
+在 `frontend/.env.local` 中配置后端地址：
+
+```bash
+# 开发环境（本地）
+VITE_API_URL=http://localhost:3002
+
+# 生产环境（服务器）
+VITE_API_URL=http://your-server-ip:3002
+```
+
+#### 2. 后端数据库配置
+
+数据库文件默认位置：`backend/instance/mixcut_refactored.db`
+
+如需修改，在 `backend/config.py` 中更改：
+
+```python
+SQLALCHEMY_DATABASE_URI = 'sqlite:///mixcut_refactored.db'
+```
+
+#### 3. 阿里云 OSS 配置（可选）
+
+在 `backend/config.py` 中配置 OSS：
+
+```python
+OSS_CONFIG = {
+    'access_key_id': 'your-access-key-id',
+    'access_key_secret': 'your-access-key-secret',
+    'endpoint': 'oss-cn-beijing.aliyuncs.com',
+    'bucket_name': 'your-bucket-name',
+    'cdn_domain': '',  # 可选
+}
+
+# 启用/禁用 OSS
+OSS_ENABLED = True  # 或 False
+```
+
+#### 4. 文字快剪 ASR 配置
+
+如需使用文字快剪功能，在 `backend/config.py` 中配置：
+
+```python
+KAIPAI_ASR_CONFIG = {
+    'access_key_id': 'your-access-key',
+    'access_key_secret': 'your-secret',
+    'app_key': 'your-app-key',
+}
+```
+
+### 数据库迁移说明
+
+当代码更新导致数据库表结构变化时，需要迁移数据库：
+
+#### 方法一：自动重建（会丢失数据）
+
+```bash
+cd backend
+# 删除旧数据库
+rm instance/mixcut_refactored.db
+# 重启服务会自动创建新表
+python app_new.py
+```
+
+#### 方法二：手动添加字段（保留数据）
+
+```bash
+cd backend
+python -c "
+import sqlite3
+db_path = 'instance/mixcut_refactored.db'
+conn = sqlite3.connect(db_path)
+cursor = conn.cursor()
+
+# 添加新字段示例
+cursor.execute('ALTER TABLE renders ADD COLUMN oss_url VARCHAR(500)')
+cursor.execute('ALTER TABLE renders ADD COLUMN oss_bucket VARCHAR(100)')
+cursor.execute('ALTER TABLE renders ADD COLUMN oss_object_key VARCHAR(500)')
+cursor.execute('ALTER TABLE renders ADD COLUMN oss_upload_status VARCHAR(20)')
+
+conn.commit()
+conn.close()
+print('Migration completed!')
+"
+```
+
+### 生产环境部署步骤
+
+1. **克隆代码**
+   ```bash
+   git clone https://github.com/wangshitan226-arch/mixcut-code.git
+   cd mixcut-code
+   ```
+
+2. **配置环境**
+   - 修改 `frontend/.env.local` 中的 API 地址
+   - 修改 `backend/config.py` 中的 OSS 和 ASR 配置
+
+3. **安装依赖**
+   ```bash
+   # 后端
+   cd backend
+   pip install -r requirements.txt
+   
+   # 前端
+   cd ../frontend
+   npm install
+   ```
+
+4. **构建前端**
+   ```bash
+   cd frontend
+   npm run build
+   ```
+
+5. **启动服务**
+   ```bash
+   # 后端（使用生产服务器如 gunicorn）
+   cd backend
+   python app_new.py
+   
+   # 或使用 gunicorn
+   gunicorn -w 4 -b 0.0.0.0:3002 "app_new:create_app()"
+   ```
+
+### 常见问题
+
+#### 1. 前端无法连接后端
+- 检查 `frontend/.env.local` 中的 `VITE_API_URL` 是否正确
+- 确保后端服务已启动且防火墙允许访问
+
+#### 2. 数据库字段缺失报错
+- 错误：`no such column: renders.oss_url`
+- 解决：按照上方"数据库迁移说明"添加缺失字段
+
+#### 3. 文件上传/删除失败
+- 检查目录权限：`uploads/`, `unified/`, `renders/` 需要可写权限
+- 检查磁盘空间是否充足
+
+#### 4. FFmpeg 相关错误
+- 确保 FFmpeg 已安装：`ffmpeg -version`
+- 确保在系统 PATH 中
+
 ## 最近更新
 
 ### 2026-04-21
@@ -232,6 +382,7 @@ combinations = list(itertools.product(*shot_materials))
 - ✅ 优化视频转码为 10-bit 格式（yuv420p10le）
 - ✅ 修复多素材合成时的格式兼容性问题
 - ✅ 重构前端组件结构，模块化 KaipaiEditor
+- ✅ 添加服务器部署配置文档
 
 ## License
 

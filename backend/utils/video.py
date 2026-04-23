@@ -139,12 +139,17 @@ def fast_concat_videos(unified_files, output_path):
     
     try:
         if all_have_audio:
+            # 重新编码音频为AAC格式，确保兼容性
             cmd = [
                 'ffmpeg', '-y',
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', list_file,
-                '-c', 'copy',
+                '-c:v', 'copy',
+                '-c:a', 'aac',
+                '-b:a', '128k',
+                '-ar', '44100',
+                '-ac', '2',
                 '-movflags', '+faststart',
                 output_path
             ]
@@ -184,12 +189,17 @@ def fast_concat_videos(unified_files, output_path):
                         abs_path = os.path.abspath(filepath)
                         f.write(f"file '{abs_path}'\n")
                 
+                # 重新编码音频为AAC格式，确保兼容性
                 cmd = [
                     'ffmpeg', '-y',
                     '-f', 'concat',
                     '-safe', '0',
                     '-i', list_file,
-                    '-c', 'copy',
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    '-b:a', '128k',
+                    '-ar', '44100',
+                    '-ac', '2',
                     '-movflags', '+faststart',
                     output_path
                 ]

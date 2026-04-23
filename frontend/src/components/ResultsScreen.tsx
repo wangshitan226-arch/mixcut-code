@@ -294,7 +294,8 @@ export default function ResultsScreen({
     
     // Now download the video
     try {
-      await downloadVideo(`${API_BASE_URL}${videoUrl}`, `mixcut_${item.id}.mp4`);
+      const fullUrl = videoUrl.startsWith('http') ? videoUrl : `${API_BASE_URL}${videoUrl}`;
+      await downloadVideo(fullUrl, `mixcut_${item.id}.mp4`);
     } catch (error) {
       console.error('下载失败:', error);
       alert('下载失败：' + (error instanceof Error ? error.message : '请重试'));
@@ -320,7 +321,8 @@ export default function ResultsScreen({
         
         // Download
         if (videoUrl) {
-          await downloadVideo(`${API_BASE_URL}${videoUrl}`, `mixcut_${item.id}.mp4`);
+          const fullUrl = videoUrl.startsWith('http') ? videoUrl : `${API_BASE_URL}${videoUrl}`;
+          await downloadVideo(fullUrl, `mixcut_${item.id}.mp4`);
         }
         
         // Small delay between downloads
@@ -476,7 +478,7 @@ export default function ResultsScreen({
                         {item.preview_url ? (
                           // Video ready - play it
                           <video
-                            src={`${API_BASE_URL}${item.preview_url}`}
+                            src={item.preview_url.startsWith('http') ? item.preview_url : `${API_BASE_URL}${item.preview_url}`}
                             className="w-full h-full object-contain"
                             controls
                             autoPlay

@@ -33,7 +33,7 @@ RENDER_MAX_AGE_HOURS = 24
 # ==================== OSS配置 ====================
 OSS_CONFIG = {
     # 阿里云OSS配置
-    # 请设置环境变量 OSS_ACCESS_KEY_ID 和 OSS_ACCESS_KEY_SECRET
+    # 从环境变量读取敏感信息
     'access_key_id': os.environ.get('OSS_ACCESS_KEY_ID', ''),
     'access_key_secret': os.environ.get('OSS_ACCESS_KEY_SECRET', ''),
     'endpoint': 'oss-cn-beijing.aliyuncs.com',  # 华北2(北京)
@@ -55,6 +55,12 @@ ICE_CONFIG = {
 
 # 是否启用ICE模板渲染
 ICE_ENABLED = bool(ICE_CONFIG['access_key_id'] and ICE_CONFIG['access_key_secret'])
+
+# ==================== ICE直接裁剪优化配置 ====================
+# 是否使用ICE直接裁剪模式（跳过本地FFmpeg处理）
+# True:  使用ICE的In/Out参数直接裁剪，省去下载、FFmpeg处理、上传环节（推荐）
+# False: 使用本地FFmpeg裁剪后上传中间视频到ICE（兼容模式）
+USE_ICE_DIRECT_CROP = True
 
 
 def ensure_directories():

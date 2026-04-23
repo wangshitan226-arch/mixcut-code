@@ -69,6 +69,9 @@ export default function KaipaiEditor({
 
   // 原始视频URL（从草稿获取）
   const [originalVideoUrl, setOriginalVideoUrl] = useState<string>('');
+  
+  // 预览视频URL（优先使用导出的视频，如果没有则使用原始视频）
+  const [previewVideoUrl, setPreviewVideoUrl] = useState<string>('');
 
   // 存储完整的ASR结果（包含被删除的片段）用于跳转判断
   const [allAsrSegments, setAllAsrSegments] = useState<Segment[]>([]);
@@ -92,10 +95,30 @@ export default function KaipaiEditor({
         // 保存原始视频URL
         if (draftData.original_video_url) {
           setOriginalVideoUrl(draftData.original_video_url);
+          // 初始化预览视频URL（优先使用已导出的视频）
+          // 后端返回的是 output_video_url 字段
+          const exportedUrl = draftData.output_video_url || draftData.output_url;
+          if (exportedUrl) {
+            setPreviewVideoUrl(exportedUrl);
+            setOutputUrl(exportedUrl);
+            console.log('[预览] 使用已导出的视频:', exportedUrl);
+          } else {
+            setPreviewVideoUrl(draftData.original_video_url);
+            console.log('[预览] 使用原始视频:', draftData.original_video_url);
+          }
         }
 
         // 加载ASR结果
         if (draftData.asr_result && draftData.asr_result.sentences) {
+          // 输出DeepSeek提取状态（从缓存加载时）
+          console.log('[DeepSeek] 从缓存加载，提取状态:', draftData.extract_status);
+          if (draftData.extracted_title) {
+            console.log('[DeepSeek] 已提取标题:', draftData.extracted_title);
+          }
+          if (draftData.extracted_keywords) {
+            console.log('[DeepSeek] 已提取关键词:', draftData.extracted_keywords);
+          }
+
           const allSegments = draftData.asr_result.sentences.map(
             (s: Segment) => ({
               ...s,
@@ -194,6 +217,24 @@ export default function KaipaiEditor({
         const data = await response.json();
 
         if (data.status === 'completed') {
+          // 输出DeepSeek提取状态到控制台
+          console.log('[DeepSeek] ASR完成，提取状态:', data.extract_status);
+          console.log('[DeepSeek] 完整响应:', data);
+          
+          if (data.extract_status === 'completed') {
+            console.log('[DeepSeek] ✅ 提取完成:');
+            console.log('  标题:', data.extracted_title);
+            console.log('  关键词:', data.extracted_keywords);
+          } else if (data.extract_status === 'failed') {
+            console.error('[DeepSeek] ❌ 提取失败:', data.extract_error);
+          } else if (data.extract_status === 'timeout') {
+            console.warn('[DeepSeek] ⏱️ 提取超时');
+          } else if (data.extract_status === 'processing') {
+            console.log('[DeepSeek] ⏳ 正在提取中...');
+          } else if (data.extract_status === 'unknown') {
+            console.warn('[DeepSeek] ⚠️ 提取状态未知');
+          }
+
           // 重新加载草稿获取ASR结果
           const draftResponse = await fetch(
             `${API_BASE_URL}/api/kaipai/${editId}`
@@ -236,6 +277,12 @@ export default function KaipaiEditor({
           }
 
           setLoading(false);
+          
+          // 如果DeepSeek还在处理中，继续轮询
+          if (data.extract_status === 'processing') {
+            setTimeout(checkStatus, 2000);
+            return;
+          }
         } else if (data.status === 'failed') {
           setError('语音识别失败: ' + (data.error || '未知错误'));
           setLoading(false);
@@ -557,6 +604,11 @@ export default function KaipaiEditor({
   // 选择模板
   const selectTemplate = useCallback(async (template: Template | null) => {
     try {
+      // 如果点击的是当前已选中的模板，则取消选择
+      if (template && selectedTemplate?.id === template.id) {
+        template = null;
+      }
+      
       // 保存到后端
       const response = await fetch(`${API_BASE_URL}/api/kaipai/${editId}/template`, {
         method: 'PUT',
@@ -575,7 +627,7 @@ export default function KaipaiEditor({
       console.error('选择模板失败:', err);
       alert('选择模板失败');
     }
-  }, [editId]);
+  }, [editId, selectedTemplate]);
 
   // 导出最终视频（使用新的export接口）
   const exportVideo = useCallback(async () => {
@@ -610,6 +662,9 @@ export default function KaipaiEditor({
         if (statusData.status === 'completed') {
           clearInterval(checkStatus);
           setOutputUrl(statusData.output_url);
+          // 更新预览视频为导出的视频
+          setPreviewVideoUrl(statusData.output_url);
+          console.log('[预览] 导出完成，更新预览视频:', statusData.output_url);
           setIsExporting(false);
           alert('视频导出完成！');
         } else if (statusData.status === 'failed') {
@@ -707,7 +762,7 @@ export default function KaipaiEditor({
       {/* 主内容区 - 视频预览 */}
       <div className="flex-1 flex flex-col min-h-0">
         <VideoPlayer
-          videoUrl={originalVideoUrl}
+          videoUrl={previewVideoUrl}
           currentTime={currentTime}
           isPlaying={isPlaying}
           subtitle={currentSubtitle}
@@ -901,48 +956,67 @@ export default function KaipaiEditor({
               ) : (
                 <div className="flex gap-4 h-full items-center">
                   {/* 模板封面列表 */}
-                  {templates.map((template) => (
+                  {templates.map((template) => {
+                    const isNoTemplate = template.name === '无模板' || template.category === 'none';
+                    const isSelected = selectedTemplate?.id === template.id;
+                    
+                    return (
                     <button
                       key={template.id}
                       onClick={() => selectTemplate(template)}
                       className={`relative shrink-0 w-[100px] flex flex-col items-center gap-2 transition-all ${
-                        selectedTemplate?.id === template.id ? 'scale-105' : ''
+                        isSelected ? 'scale-105' : ''
                       }`}
                     >
                       {/* 封面图 - 占满整个框 */}
                       <div 
                         className={`w-[100px] h-[130px] rounded-xl overflow-hidden border-2 transition-all ${
-                          selectedTemplate?.id === template.id
-                            ? 'border-purple-500 shadow-lg'
+                          isSelected
+                            ? isNoTemplate 
+                              ? 'border-gray-400 shadow-lg' 
+                              : 'border-purple-500 shadow-lg'
                             : 'border-gray-200'
                         }`}
                       >
-                        {template.preview_url ? (
+                        {template.preview_url && !isNoTemplate ? (
                           <img 
                             src={template.preview_url} 
                             alt={template.name}
                             className="w-full h-full object-cover"
                           />
                         ) : (
-                          <div className="w-full h-full bg-gradient-to-br from-purple-100 to-blue-100 flex items-center justify-center">
-                            <LayoutTemplate size={32} className="text-purple-300" />
+                          <div className={`w-full h-full flex items-center justify-center ${
+                            isNoTemplate 
+                              ? 'bg-gradient-to-br from-gray-100 to-gray-200' 
+                              : 'bg-gradient-to-br from-purple-100 to-blue-100'
+                          }`}>
+                            {isNoTemplate ? (
+                              <X size={32} className="text-gray-400" />
+                            ) : (
+                              <LayoutTemplate size={32} className="text-purple-300" />
+                            )}
                           </div>
                         )}
                       </div>
                       {/* 模板名称 - 下方 */}
                       <span className={`text-[11px] text-center font-medium leading-tight ${
-                        selectedTemplate?.id === template.id ? 'text-purple-600' : 'text-gray-700'
+                        isSelected 
+                          ? isNoTemplate ? 'text-gray-600' : 'text-purple-600'
+                          : 'text-gray-700'
                       }`}>
                         {template.name}
                       </span>
                       {/* 选中标记 */}
-                      {selectedTemplate?.id === template.id && (
-                        <div className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-purple-500 flex items-center justify-center shadow-md">
+                      {isSelected && (
+                        <div className={`absolute -top-1 -right-1 w-5 h-5 rounded-full flex items-center justify-center shadow-md ${
+                          isNoTemplate ? 'bg-gray-500' : 'bg-purple-500'
+                        }`}>
                           <Check size={12} className="text-white" />
                         </div>
                       )}
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

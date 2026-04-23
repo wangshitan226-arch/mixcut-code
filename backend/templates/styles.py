@@ -4,64 +4,109 @@
 定义所有可用的字幕样式参数
 """
 
-# 基础样式定义
+# 基础样式定义 - 支持模板扩展
+# 默认字体大小150，可通过模板配置覆盖
+
 SUBTITLE_STYLES = {
     'title': {
-        'font': 'AlibabaPuHuiTi-Heavy',
-        'font_size': 90,
-        'font_color': '#FFD700',
-        'outline': 5,
-        'outline_color': '#8B4513',
-        'motion_in': 'rotateup_in',
-        'motion_out': 'close_out',
-        'y': 0.35,
-        'weight': 1.5
-    },
-    'subtitle': {
-        'font': 'AlibabaPuHuiTi-Regular',
-        'font_size': 50,
+        'font': 'SimSun',
+        'font_size': 150,  # 默认150，可通过模板覆盖
         'font_color': '#FFFFFF',
-        'outline': 3,
-        'outline_color': '#333333',
+        'outline': 40,
+        'outline_color': '#000000',
         'motion_in': 'fade_in',
         'motion_out': 'fade_out',
-        'y': 0.52,
-        'weight': 1.2
+        'x': 0,
+        'y': 500,
+        'alignment': 'TopLeft',
+        'adapt_mode': 'AutoWrap',
+        'size_request_type': 'RealDim'
+    },
+    'subtitle': {
+        'font': 'SimSun',
+        'font_size': 150,
+        'font_color': '#FFFFFF',
+        'outline': 40,
+        'outline_color': '#000000',
+        'motion_in': 'fade_in',
+        'motion_out': 'fade_out',
+        'x': 0,
+        'y': 500,
+        'alignment': 'TopLeft',
+        'adapt_mode': 'AutoWrap',
+        'size_request_type': 'RealDim'
     },
     'body': {
-        'font': 'AlibabaPuHuiTi-Regular',
-        'font_size': 42,
+        'font': 'SimSun',
+        'font_size': 150,
         'font_color': '#FFFFFF',
-        'outline': 2,
+        'outline': 40,
         'outline_color': '#000000',
-        'motion_in': 'scroll_right_in',
-        'motion_out': 'scroll_right_out',
-        'y': 0.72,
-        'weight': 1.0
+        'motion_in': 'fade_in',
+        'motion_out': 'fade_out',
+        'x': 0,
+        'y': 500,
+        'alignment': 'TopLeft',
+        'adapt_mode': 'AutoWrap',
+        'size_request_type': 'RealDim'
     },
     'emphasis': {
-        'font': 'AlibabaPuHuiTi-Bold',
-        'font_size': 60,
-        'font_color': '#FFDD00',
-        'outline': 4,
-        'outline_color': '#FF6600',
-        'motion_in': 'slingshot_in',
-        'motion_out': 'slingshot_out',
-        'y': 0.5,
-        'weight': 1.0,
-        'loop': 2,
-        'loop_effect': 'bounce'
+        'font': 'SimSun',
+        'font_size': 150,
+        'font_color': '#FFFFFF',
+        'outline': 40,
+        'outline_color': '#000000',
+        'motion_in': 'fade_in',
+        'motion_out': 'fade_out',
+        'x': 0,
+        'y': 500,
+        'alignment': 'TopLeft',
+        'adapt_mode': 'AutoWrap',
+        'size_request_type': 'RealDim',
+        'effect_color_style': 'red_grad'  # 强调样式使用花字
     },
     'data': {
-        'font': 'AlibabaPuHuiTi-Bold',
-        'font_size': 80,
-        'font_color': '#00FF88',
-        'outline': 4,
-        'outline_color': '#00CC66',
-        'motion_in': 'close_in',
-        'motion_out': 'close_out',
-        'y': 0.45,
-        'weight': 1.2
+        'font': 'SimSun',
+        'font_size': 150,
+        'font_color': '#FFFFFF',
+        'outline': 40,
+        'outline_color': '#000000',
+        'motion_in': 'fade_in',
+        'motion_out': 'fade_out',
+        'x': 0,
+        'y': 500,
+        'alignment': 'TopLeft',
+        'adapt_mode': 'AutoWrap',
+        'size_request_type': 'RealDim',
+        'effect_color_style': 'golden'  # 数据样式使用金色花字
+    },
+    'question': {
+        'font': 'SimSun',
+        'font_size': 150,
+        'font_color': '#FFFFFF',
+        'outline': 40,
+        'outline_color': '#000000',
+        'motion_in': 'fade_in',
+        'motion_out': 'fade_out',
+        'x': 0,
+        'y': 500,
+        'alignment': 'TopLeft',
+        'adapt_mode': 'AutoWrap',
+        'size_request_type': 'RealDim'
+    },
+    'quote': {
+        'font': 'SimSun',
+        'font_size': 150,
+        'font_color': '#FFFFFF',
+        'outline': 40,
+        'outline_color': '#000000',
+        'motion_in': 'fade_in',
+        'motion_out': 'fade_out',
+        'x': 0,
+        'y': 500,
+        'alignment': 'TopLeft',
+        'adapt_mode': 'AutoWrap',
+        'size_request_type': 'RealDim'
     }
 }
 

@@ -12,10 +12,11 @@ import logging
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from models import Render, KaipaiEdit
+from models import Render, KaipaiEdit, Material
 from extensions import db
 from utils.oss import oss_client
 from utils.kaipai_asr import create_asr_task, get_asr_task, process_asr_task
+from config import USE_ICE_DIRECT_CROP
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +260,63 @@ def get_transcription_status(edit_id):
             if task and task.get('segment_error'):
                 response['segment_error'] = task.get('segment_error')
         
+        # 添加DeepSeek提取状态
+        # 先从数据库的asr_result中读取metadata
+        asr_result = json.loads(edit.asr_result) if edit.asr_result else {}
+        db_metadata = asr_result.get('metadata', {})
+        
+        # 再从内存任务中获取状态（如果存在）
+        task = get_asr_task(edit_id)
+        if task:
+            response['extract_status'] = task.get('extract_status', 'unknown')
+            # 优先使用内存中的结果（最新）
+            if task.get('extract_status') == 'completed':
+                metadata = task.get('result', {}).get('metadata', {})
+                response['extracted_title'] = metadata.get('title', '')
+                response['extracted_keywords'] = metadata.get('keywords', [])
+                
+                # 如果内存中有结果但数据库没有，保存到数据库
+                if metadata.get('title') and not db_metadata.get('title'):
+                    try:
+                        asr_result['metadata'] = metadata
+                        edit.asr_result = json.dumps(asr_result, ensure_ascii=False)
+                        db.session.commit()
+                        logger.info(f"[DeepSeek] 提取结果已保存到数据库: {edit_id}")
+                    except Exception as e:
+                        logger.error(f"[DeepSeek] 保存到数据库失败: {e}")
+                        
+            elif task.get('extract_status') == 'failed':
+                response['extract_error'] = task.get('extract_error', '未知错误')
+            elif task.get('extract_status') == 'processing':
+                # 还在处理中，检查数据库是否有旧结果
+                if db_metadata.get('title'):
+                    response['extracted_title'] = db_metadata.get('title', '')
+                    response['extracted_keywords'] = db_metadata.get('keywords', [])
+        else:
+            # 内存中没有任务，检查数据库是否有metadata
+            if db_metadata.get('title'):
+                response['extract_status'] = 'completed'
+                response['extracted_title'] = db_metadata.get('title', '')
+                response['extracted_keywords'] = db_metadata.get('keywords', [])
+            else:
+                # 数据库也没有，启动DeepSeek提取
+                logger.info(f"[DeepSeek] 缓存加载，启动异步提取: {edit_id}")
+                from utils.kaipai_asr import create_asr_task, async_extract_title_and_keywords
+                
+                create_asr_task(edit_id, '')
+                task = get_asr_task(edit_id)
+                task['status'] = 'completed'
+                task['result'] = asr_result
+                # 先标记为处理中，防止前端显示unknown
+                task['extract_status'] = 'processing'
+                task['extract_start_time'] = time.time()
+                
+                if task['result'].get('sentences'):
+                    async_extract_title_and_keywords(edit_id, task['result']['sentences'])
+                    response['extract_status'] = 'processing'
+                else:
+                    response['extract_status'] = 'unknown'
+        
         return jsonify(response)
     
     # 从内存中获取ASR任务状态
@@ -292,6 +350,27 @@ def get_transcription_status(edit_id):
     # 如果视频分割失败，返回错误信息
     if task.get('segment_status') == 'failed' and task.get('segment_error'):
         response['segment_error'] = task.get('segment_error')
+    
+    # 添加DeepSeek提取状态
+    extract_status = task.get('extract_status', 'unknown')
+    
+    # 检查是否超时（超过60秒）
+    if extract_status == 'processing':
+        start_time = task.get('extract_start_time', 0)
+        if time.time() - start_time > 60:
+            extract_status = 'timeout'
+            task['extract_status'] = 'failed'
+            task['extract_error'] = '提取超时（超过60秒）'
+            logger.warning(f"[DeepSeek] 任务 {edit_id} 提取超时")
+    
+    response['extract_status'] = extract_status
+    
+    if extract_status == 'completed' and task.get('result', {}).get('metadata'):
+        metadata = task['result']['metadata']
+        response['extracted_title'] = metadata.get('title', '')
+        response['extracted_keywords'] = metadata.get('keywords', [])
+    elif extract_status in ['failed', 'timeout']:
+        response['extract_error'] = task.get('extract_error', '未知错误')
     
     return jsonify(response)
 
@@ -1169,12 +1248,24 @@ def _export_with_template(edit, sentences, removed_ids, asr_result, removed_segm
     """
     使用模板导出（ICE渲染）
     
-    流程：
-    1. 先做文字快剪（FFmpeg拼接删除）
-    2. 上传中间视频到OSS
-    3. 用中间视频作为输入，提交ICE模板渲染
+    支持两种模式：
+    1. ICE直接裁剪模式（USE_ICE_DIRECT_CROP=True）：
+       - 直接使用原始视频URL，通过ICE的In/Out参数裁剪
+       - 省去下载、FFmpeg处理、上传中间视频环节
+       - 预计节省 43-70% 时间
+    
+    2. 本地裁剪模式（USE_ICE_DIRECT_CROP=False）：
+       - 先做文字快剪（FFmpeg拼接删除）
+       - 上传中间视频到OSS
+       - 用中间视频作为输入，提交ICE模板渲染
     """
-    from utils.ice_renderer import generate_ice_timeline, submit_ice_job, calculate_actual_duration
+    from utils.ice_renderer import (
+        generate_ice_timeline, 
+        generate_ice_timeline_with_crop,
+        submit_ice_job, 
+        calculate_actual_duration,
+        calculate_keep_segments
+    )
     from models import Template
     
     template = Template.query.get(edit.template_id)
@@ -1190,7 +1281,8 @@ def _export_with_template(edit, sentences, removed_ids, asr_result, removed_segm
         'progress': 0,
         'output_url': None,
         'error': None,
-        'is_template': True
+        'is_template': True,
+        'use_ice_crop': USE_ICE_DIRECT_CROP  # 记录使用的模式
     })
     
     edit.status = 'processing'
@@ -1199,229 +1291,374 @@ def _export_with_template(edit, sentences, removed_ids, asr_result, removed_segm
     from flask import current_app
     app = current_app._get_current_object()
     
-    def render_with_template():
-        """渲染任务（文字快剪 + ICE模板）"""
-        with app.app_context():
-            _render_with_template_impl(app, edit, sentences, removed_ids, removed_segments, template, template_config, task_id)
+    if USE_ICE_DIRECT_CROP:
+        # 使用ICE直接裁剪模式（优化版）
+        def render_with_template_optimized():
+            """渲染任务（ICE直接裁剪 + 模板渲染）"""
+            with app.app_context():
+                _render_with_template_optimized_impl(app, edit, sentences, removed_ids, asr_result, template, template_config, task_id)
+        
+        render_executor.submit(render_with_template_optimized)
+        
+        return jsonify({
+            'edit_id': edit.id,
+            'status': 'processing',
+            'task_id': task_id,
+            'use_template': True,
+            'use_ice_crop': True,
+            'template_name': template.name,
+            'message': '开始渲染：ICE直接裁剪 + 模板渲染（优化模式）'
+        })
+    else:
+        # 使用本地裁剪模式（原有逻辑）
+        def render_with_template():
+            """渲染任务（文字快剪 + ICE模板）"""
+            with app.app_context():
+                _render_with_template_impl(app, edit, sentences, removed_ids, removed_segments, template, template_config, task_id)
+        
+        render_executor.submit(render_with_template)
+        
+        return jsonify({
+            'edit_id': edit.id,
+            'status': 'processing',
+            'task_id': task_id,
+            'use_template': True,
+            'use_ice_crop': False,
+            'template_name': template.name,
+            'message': '开始渲染：文字快剪 + 模板渲染（兼容模式）'
+        })
+
+
+def _render_with_template_optimized_impl(app, edit, sentences, removed_ids, asr_result, template, template_config, task_id):
+    """
+    优化的渲染实现（ICE直接裁剪模式）
     
-    def _render_with_template_impl(app, edit, sentences, removed_ids, removed_segments, template, template_config, task_id):
-        """实际的渲染实现（在应用上下文中运行）"""
-        temp_files_to_cleanup = []
-        intermediate_video_url = None
+    流程：
+    1. 直接使用原始视频URL
+    2. 生成带In/Out裁剪参数的Timeline
+    3. 提交ICE任务（裁剪+渲染一次完成）
+    """
+    from utils.ice_renderer import (
+        generate_ice_timeline_with_crop,
+        submit_ice_job
+    )
+    
+    try:
+        _update_render_task(task_id, progress=10)
+        
+        video_url = edit.original_video_url
+        user_id = edit.user_id
+        
+        logger.info(f"[Task {task_id}] ICE直接裁剪模式开始...")
+        logger.info(f"[Task {task_id}] 原始视频: {video_url[:80]}...")
+        
+        # 获取视频时长
+        video_duration_ms = asr_result.get('videoInfo', {}).get('duration', 0) * 1000
+        if video_duration_ms <= 0:
+            # 尝试从句子计算
+            if sentences:
+                video_duration_ms = max(s.get('endTime', 0) for s in sentences)
+        
+        if video_duration_ms <= 0:
+            raise Exception('无法获取视频时长')
+        
+        logger.info(f"[Task {task_id}] 视频时长: {video_duration_ms}ms")
+        
+        _update_render_task(task_id, progress=30)
+        
+        # ========== 核心：生成带裁剪参数的Timeline ==========
+        logger.info(f"[Task {task_id}] 生成ICE Timeline（带裁剪参数）...")
+        
+        timeline = generate_ice_timeline_with_crop(
+            video_url=video_url,  # 直接使用原始视频URL
+            sentences=sentences,
+            removed_segment_ids=removed_ids,
+            template_config=template_config,
+            video_duration_ms=video_duration_ms,
+            asr_result=asr_result  # 传入ASR结果，包含DeepSeek提取的标题
+        )
+        
+        _update_render_task(task_id, progress=50)
+        
+        # 提交ICE任务
+        logger.info(f"[Task {task_id}] 提交ICE渲染任务...")
+        output_filename = f"kaipai_template_{edit.id}_{int(datetime.now().timestamp())}.mp4"
+        job_id, output_url = submit_ice_job(timeline, user_id, output_filename)
+        
+        logger.info(f"[Task {task_id}] ICE任务提交成功: {job_id}")
+        
+        _update_render_task(task_id, progress=60, ice_job_id=job_id)
+        
+        # 轮询ICE任务状态（优化轮询间隔）
+        from utils.ice_renderer import get_job_status
+        import time
+        
+        poll_interval = 2  # 初始2秒
+        max_interval = 10  # 最大10秒
+        
+        while True:
+            try:
+                status = get_job_status(job_id)
+                
+                if status == 'Success':
+                    logger.info(f"[Task {task_id}] ICE渲染完成: {output_url[:80]}...")
+                    _update_render_task(task_id, status='completed', progress=100, output_url=output_url)
+                    with db.session.begin():
+                        edit_update = KaipaiEdit.query.get(edit.id)
+                        if edit_update:
+                            edit_update.output_video_url = output_url
+                            edit_update.status = 'completed'
+                    break
+                elif status == 'Failed':
+                    logger.error(f"[Task {task_id}] ICE渲染失败")
+                    _update_render_task(task_id, status='failed', error='ICE render failed')
+                    with db.session.begin():
+                        edit_update = KaipaiEdit.query.get(edit.id)
+                        if edit_update:
+                            edit_update.status = 'failed'
+                    break
+                else:
+                    # 更新进度（60-95%）
+                    current_progress = render_tasks.get(task_id, {}).get('progress', 60)
+                    new_progress = min(95, current_progress + 5)
+                    _update_render_task(task_id, progress=new_progress)
+                
+                # 指数退避
+                time.sleep(poll_interval)
+                poll_interval = min(poll_interval * 1.5, max_interval)
+                
+            except Exception as e:
+                logger.error(f"[Task {task_id}] 轮询ICE状态失败: {e}")
+                time.sleep(5)
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"[Task {task_id}] 渲染失败: {error_msg}")
+        _update_render_task(task_id, status='failed', error=error_msg)
         
         try:
-            _update_render_task(task_id, progress=5)
+            with db.session.begin():
+                edit_update = KaipaiEdit.query.get(edit.id)
+                if edit_update:
+                    edit_update.status = 'failed'
+        except Exception:
+            pass
+
+
+def _render_with_template_impl(app, edit, sentences, removed_ids, removed_segments, template, template_config, task_id):
+    """
+    原有的渲染实现（本地裁剪模式，作为fallback保留）
+    
+    流程：
+    1. 先做文字快剪（FFmpeg拼接删除）
+    2. 上传中间视频到OSS
+    3. 用中间视频作为输入，提交ICE模板渲染
+    """
+    temp_files_to_cleanup = []
+    intermediate_video_url = None
+    
+    try:
+        _update_render_task(task_id, progress=5)
+        
+        # ========== 第1步：文字快剪（FFmpeg拼接删除）==========
+        logger.info(f"[Task {task_id}] 开始文字快剪（本地模式）...")
+        
+        video_url = edit.original_video_url
+        user_id = edit.user_id
+        
+        # 下载原始视频
+        local_video_path = os.path.join('uploads', get_unique_filename('video'))
+        if video_url.startswith('http'):
+            import requests
+            logger.info(f"[Task {task_id}] 下载视频...")
+            response = requests.get(video_url, timeout=120)
+            response.raise_for_status()
+            with open(local_video_path, 'wb') as f:
+                f.write(response.content)
+        else:
+            local_video_path = video_url.lstrip('/')
+        
+        _update_render_task(task_id, progress=15)
+        
+        # 获取视频时长
+        video_duration_ms = get_video_duration(local_video_path)
+        if video_duration_ms is None:
+            video_duration_ms = asr_result.get('videoInfo', {}).get('duration', 0) * 1000
+        
+        if video_duration_ms <= 0:
+            raise Exception('无法获取视频时长')
+        
+        _update_render_task(task_id, progress=25)
+        
+        # 计算保留时间段
+        keep_segments = calculate_keep_segments(removed_segments, video_duration_ms)
+        
+        if len(keep_segments) == 0:
+            raise Exception('没有可保留的视频片段')
+        
+        _update_render_task(task_id, progress=30)
+        
+        # 生成中间视频文件（文字快剪结果）
+        intermediate_filename = f"kaipai_intermediate_{edit.id}_{int(datetime.now().timestamp())}.mp4"
+        intermediate_path = os.path.join('renders', intermediate_filename)
+        temp_files_to_cleanup.append(intermediate_path)
+        
+        # 使用FFmpeg处理
+        if len(keep_segments) == 1:
+            # 单段裁剪
+            start_sec = keep_segments[0][0] / 1000
+            duration = (keep_segments[0][1] - keep_segments[0][0]) / 1000
             
-            # ========== 第1步：文字快剪（FFmpeg拼接删除）==========
-            logger.info(f"[Task {task_id}] 开始文字快剪...")
-            
-            video_url = edit.original_video_url
-            user_id = edit.user_id
-            
-            # 下载原始视频
-            local_video_path = os.path.join('uploads', get_unique_filename('video'))
-            if video_url.startswith('http'):
-                import requests
-                logger.info(f"[Task {task_id}] 下载视频...")
-                response = requests.get(video_url, timeout=120)
-                response.raise_for_status()
-                with open(local_video_path, 'wb') as f:
-                    f.write(response.content)
-            else:
-                local_video_path = video_url.lstrip('/')
-            
-            _update_render_task(task_id, progress=15)
-            
-            # 获取视频时长
-            video_duration_ms = get_video_duration(local_video_path)
-            if video_duration_ms is None:
-                video_duration_ms = asr_result.get('videoInfo', {}).get('duration', 0) * 1000
-            
-            if video_duration_ms <= 0:
-                raise Exception('无法获取视频时长')
-            
-            _update_render_task(task_id, progress=25)
-            
-            # 计算保留时间段
-            keep_segments = calculate_keep_segments(removed_segments, video_duration_ms)
-            
-            if len(keep_segments) == 0:
-                raise Exception('没有可保留的视频片段')
-            
-            _update_render_task(task_id, progress=30)
-            
-            # 生成中间视频文件（文字快剪结果）
-            intermediate_filename = f"kaipai_intermediate_{edit.id}_{int(datetime.now().timestamp())}.mp4"
-            intermediate_path = os.path.join('renders', intermediate_filename)
-            temp_files_to_cleanup.append(intermediate_path)
-            
-            # 使用FFmpeg处理
-            if len(keep_segments) == 1:
-                # 单段裁剪
-                start_sec = keep_segments[0][0] / 1000
-                duration = (keep_segments[0][1] - keep_segments[0][0]) / 1000
+            cmd = [
+                'ffmpeg', '-y', '-i', local_video_path,
+                '-ss', str(start_sec), '-t', str(duration),
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '128k',
+                intermediate_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise Exception(f'视频裁剪失败: {result.stderr[:200]}')
+        else:
+            # 多段拼接
+            segment_files = []
+            for i, (start, end) in enumerate(keep_segments):
+                start_sec = start / 1000
+                duration = (end - start) / 1000
+                temp_file = os.path.join('renders', get_unique_filename('segment') + '.mp4')
+                temp_files_to_cleanup.append(temp_file)
+                segment_files.append(temp_file)
                 
-                cmd = [
+                segment_cmd = [
                     'ffmpeg', '-y', '-i', local_video_path,
                     '-ss', str(start_sec), '-t', str(duration),
                     '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                     '-c:a', 'aac', '-b:a', '128k',
-                    intermediate_path
+                    temp_file
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                result = subprocess.run(segment_cmd, capture_output=True, text=True)
                 if result.returncode != 0:
-                    raise Exception(f'视频裁剪失败: {result.stderr[:200]}')
-            else:
-                # 多段拼接
-                segment_files = []
-                for i, (start, end) in enumerate(keep_segments):
-                    start_sec = start / 1000
-                    duration = (end - start) / 1000
-                    temp_file = os.path.join('renders', get_unique_filename('segment') + '.mp4')
-                    temp_files_to_cleanup.append(temp_file)
-                    segment_files.append(temp_file)
-                    
-                    segment_cmd = [
-                        'ffmpeg', '-y', '-i', local_video_path,
-                        '-ss', str(start_sec), '-t', str(duration),
-                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                        '-c:a', 'aac', '-b:a', '128k',
-                        temp_file
-                    ]
-                    result = subprocess.run(segment_cmd, capture_output=True, text=True)
-                    if result.returncode != 0:
-                        raise Exception(f'分割视频段失败: {result.stderr[:200]}')
-                
-                _update_render_task(task_id, progress=50)
-                
-                # 创建concat列表
-                list_file = os.path.join('renders', get_unique_filename('concat_list') + '.txt')
-                temp_files_to_cleanup.append(list_file)
-                
-                with open(list_file, 'w') as f:
-                    for temp_file in segment_files:
-                        abs_path = os.path.abspath(temp_file).replace('\\', '/')
-                        f.write(f"file '{abs_path}'\n")
-                
-                # 拼接
-                temp_output = os.path.join('renders', get_unique_filename('temp_concat') + '.mp4')
-                temp_files_to_cleanup.append(temp_output)
-                
-                concat_cmd = [
-                    'ffmpeg', '-y',
-                    '-f', 'concat',
-                    '-safe', '0',
-                    '-i', list_file,
-                    '-c', 'copy',
-                    temp_output
-                ]
-                result = subprocess.run(concat_cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    raise Exception(f'视频拼接失败: {result.stderr[:200]}')
-                
-                import shutil
-                shutil.copy(temp_output, intermediate_path)
+                    raise Exception(f'分割视频段失败: {result.stderr[:200]}')
             
-            _update_render_task(task_id, progress=60)
+            _update_render_task(task_id, progress=50)
             
-            # 上传中间视频到OSS
-            logger.info(f"[Task {task_id}] 上传中间视频到OSS...")
-            intermediate_video_url = oss_client.upload_render(intermediate_path, f"intermediate_{edit.id}", user_id)
+            # 创建concat列表
+            list_file = os.path.join('renders', get_unique_filename('concat_list') + '.txt')
+            temp_files_to_cleanup.append(list_file)
             
-            _update_render_task(task_id, progress=70)
+            with open(list_file, 'w') as f:
+                for temp_file in segment_files:
+                    abs_path = os.path.abspath(temp_file).replace('\\', '/')
+                    f.write(f"file '{abs_path}'\n")
             
-            # ========== 第2步：ICE模板渲染 ==========
-            logger.info(f"[Task {task_id}] 开始ICE模板渲染...")
+            # 拼接
+            temp_output = os.path.join('renders', get_unique_filename('temp_concat') + '.mp4')
+            temp_files_to_cleanup.append(temp_output)
             
-            # 生成ICE Timeline（使用中间视频作为输入）
-            timeline = generate_ice_timeline(
-                video_url=intermediate_video_url,  # 使用文字快剪后的视频
-                sentences=sentences,
-                removed_segment_ids=removed_ids,  # 字幕数据仍然需要，用于生成字幕clips
-                template_config=template_config,
-                video_duration_ms=calculate_actual_duration([s for s in sentences if s['id'] not in removed_ids])
-            )
+            concat_cmd = [
+                'ffmpeg', '-y',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', list_file,
+                '-c', 'copy',
+                temp_output
+            ]
+            result = subprocess.run(concat_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise Exception(f'视频拼接失败: {result.stderr[:200]}')
             
-            # 提交ICE任务
-            output_filename = f"kaipai_template_{edit.id}_{int(datetime.now().timestamp())}.mp4"
-            job_id, output_url = submit_ice_job(timeline, user_id, output_filename)
-            
-            _update_render_task(task_id, progress=80, ice_job_id=job_id)
-            
-            # 轮询ICE任务状态
-            from utils.ice_renderer import get_job_status
-            import time
-            
-            while True:
-                try:
-                    status = get_job_status(job_id)
-                    
-                    if status == 'Success':
-                        _update_render_task(task_id, status='completed', progress=100, output_url=output_url)
-                        with db.session.begin():
-                            edit_update = KaipaiEdit.query.get(edit.id)
-                            if edit_update:
-                                edit_update.output_video_url = output_url
-                                edit_update.status = 'completed'
-                        break
-                    elif status == 'Failed':
-                        _update_render_task(task_id, status='failed', error='ICE render failed')
-                        with db.session.begin():
-                            edit_update = KaipaiEdit.query.get(edit.id)
-                            if edit_update:
-                                edit_update.status = 'failed'
-                        break
-                    else:
-                        # 更新进度（80-95%）
-                        current_progress = render_tasks.get(task_id, {}).get('progress', 80)
-                        new_progress = min(95, current_progress + 3)
-                        _update_render_task(task_id, progress=new_progress)
-                    
-                    time.sleep(5)
-                    
-                except Exception as e:
-                    logger.error(f"[Task {task_id}] 轮询ICE状态失败: {e}")
-                    time.sleep(10)
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"[Task {task_id}] 渲染失败: {error_msg}")
-            _update_render_task(task_id, status='failed', error=error_msg)
-            
+            import shutil
+            shutil.copy(temp_output, intermediate_path)
+        
+        _update_render_task(task_id, progress=60)
+        
+        # 上传中间视频到OSS
+        logger.info(f"[Task {task_id}] 上传中间视频到OSS...")
+        intermediate_video_url = oss_client.upload_render(intermediate_path, f"intermediate_{edit.id}", user_id)
+        
+        _update_render_task(task_id, progress=70)
+        
+        # ========== 第2步：ICE模板渲染 ==========
+        logger.info(f"[Task {task_id}] 开始ICE模板渲染...")
+        
+        # 生成ICE Timeline（使用中间视频作为输入）
+        timeline = generate_ice_timeline(
+            video_url=intermediate_video_url,
+            sentences=sentences,
+            removed_segment_ids=removed_ids,
+            template_config=template_config,
+            video_duration_ms=calculate_actual_duration([s for s in sentences if s['id'] not in removed_ids])
+        )
+        
+        # 提交ICE任务
+        output_filename = f"kaipai_template_{edit.id}_{int(datetime.now().timestamp())}.mp4"
+        job_id, output_url = submit_ice_job(timeline, user_id, output_filename)
+        
+        _update_render_task(task_id, progress=80, ice_job_id=job_id)
+        
+        # 轮询ICE任务状态
+        from utils.ice_renderer import get_job_status
+        import time
+        
+        poll_interval = 5
+        
+        while True:
             try:
-                with db.session.begin():
-                    edit_update = KaipaiEdit.query.get(edit.id)
-                    if edit_update:
-                        edit_update.status = 'failed'
+                status = get_job_status(job_id)
+                
+                if status == 'Success':
+                    _update_render_task(task_id, status='completed', progress=100, output_url=output_url)
+                    with db.session.begin():
+                        edit_update = KaipaiEdit.query.get(edit.id)
+                        if edit_update:
+                            edit_update.output_video_url = output_url
+                            edit_update.status = 'completed'
+                    break
+                elif status == 'Failed':
+                    _update_render_task(task_id, status='failed', error='ICE render failed')
+                    with db.session.begin():
+                        edit_update = KaipaiEdit.query.get(edit.id)
+                        if edit_update:
+                            edit_update.status = 'failed'
+                    break
+                else:
+                    current_progress = render_tasks.get(task_id, {}).get('progress', 80)
+                    new_progress = min(95, current_progress + 3)
+                    _update_render_task(task_id, progress=new_progress)
+                
+                time.sleep(poll_interval)
+                
+            except Exception as e:
+                logger.error(f"[Task {task_id}] 轮询ICE状态失败: {e}")
+                time.sleep(10)
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"[Task {task_id}] 渲染失败: {error_msg}")
+        _update_render_task(task_id, status='failed', error=error_msg)
+        
+        try:
+            with db.session.begin():
+                edit_update = KaipaiEdit.query.get(edit.id)
+                if edit_update:
+                    edit_update.status = 'failed'
+        except Exception:
+            pass
+    
+    finally:
+        # 清理临时文件
+        for temp_file in temp_files_to_cleanup:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
             except Exception:
                 pass
         
-        finally:
-            # 清理临时文件
-            for temp_file in temp_files_to_cleanup:
-                try:
-                    if os.path.exists(temp_file):
-                        os.remove(temp_file)
-                except Exception:
-                    pass
-            
-            if local_video_path and os.path.exists(local_video_path) and 'video_' in local_video_path:
-                try:
-                    os.remove(local_video_path)
-                except Exception:
-                    pass
-    
-    # 提交渲染任务
-    render_executor.submit(render_with_template)
-    
-    return jsonify({
-        'edit_id': edit.id,
-        'status': 'processing',
-        'task_id': task_id,
-        'use_template': True,
-        'template_name': template.name,
-        'message': '开始渲染：文字快剪 + 模板渲染'
-    })
+        if local_video_path and os.path.exists(local_video_path) and 'video_' in local_video_path:
+            try:
+                os.remove(local_video_path)
+            except Exception:
+                pass
 
 
 def _export_without_template(edit, removed_segments, asr_result):
@@ -1609,3 +1846,33 @@ def _export_without_template(edit, removed_segments, asr_result):
         'task_id': task_id,
         'use_template': False
     })
+
+
+@kaipai_bp.route('/test-deepseek', methods=['POST'])
+def test_deepseek():
+    """测试DeepSeek API是否正常工作"""
+    try:
+        from utils.kaipai_asr import extract_title_and_keywords_with_deepseek
+        
+        test_sentences = [
+            {'text': '这是一个测试视频'},
+            {'text': '展示了如何提取标题和关键词'},
+            {'text': '增长率达到50%，非常惊人'}
+        ]
+        
+        logger.info('[Test] 开始测试DeepSeek API')
+        result = extract_title_and_keywords_with_deepseek(test_sentences)
+        logger.info(f'[Test] DeepSeek返回: {result}')
+        
+        return jsonify({
+            'success': True,
+            'result': result
+        })
+    except Exception as e:
+        logger.error(f'[Test] DeepSeek测试失败: {e}')
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500

@@ -27,7 +27,7 @@ TEMPLATES: List[Dict] = [
                 'data': SUBTITLE_STYLES['data']
             },
             'videoEffects': {
-                'enableSmartZoom': True,
+                'enableSmartZoom': False,
                 'zoomIntensity': 1.2
             }
         }
@@ -60,7 +60,7 @@ TEMPLATES: List[Dict] = [
                 'body': SUBTITLE_STYLES['body']
             },
             'videoEffects': {
-                'enableSmartZoom': True,
+                'enableSmartZoom': False,
                 'zoomIntensity': 1.25
             }
         }

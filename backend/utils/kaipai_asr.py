@@ -19,6 +19,10 @@ DASHSCOPE_API_KEY = os.environ.get('DASHSCOPE_API_KEY', 'sk-a555a4e29a474a6989cb
 DASHSCOPE_API_URL = 'https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription'
 DASHSCOPE_TASK_URL = 'https://dashscope.aliyuncs.com/api/v1/tasks'
 
+# DeepSeek 配置
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', 'sk-55c9e54b564a40dc903d39eb864c22ec')
+DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions'
+
 # 语气词列表
 FILLER_WORDS = {'嗯', '啊', '哦', '呃', '唉', '哎', '哟', '哈', '嘿', '哼', '呢', '吧', '吗'}
 
@@ -408,11 +412,15 @@ def extract_and_upload_audio(video_url: str, edit_id: str) -> str:
     """提取视频音频并上传到OSS，返回音频URL"""
     import subprocess
     import os
+    import time
     from utils.oss import oss_client
     
     try:
+        # 使用时间戳确保文件名唯一，避免文件占用冲突
+        timestamp = int(time.time())
+        
         # 下载视频到本地
-        local_video_path = os.path.join('uploads', f'temp_audio_extract_{edit_id}.mp4')
+        local_video_path = os.path.join('uploads', f'temp_audio_extract_{edit_id}_{timestamp}.mp4')
         if video_url.startswith('http'):
             response = requests.get(video_url, timeout=120)
             with open(local_video_path, 'wb') as f:
@@ -421,7 +429,7 @@ def extract_and_upload_audio(video_url: str, edit_id: str) -> str:
             local_video_path = video_url.lstrip('/')
         
         # 提取音频并重新编码
-        audio_path = os.path.join('uploads', f'audio_{edit_id}.mp3')
+        audio_path = os.path.join('uploads', f'audio_{edit_id}_{timestamp}.mp3')
         cmd = [
             'ffmpeg', '-y',
             '-i', local_video_path,
@@ -444,13 +452,20 @@ def extract_and_upload_audio(video_url: str, edit_id: str) -> str:
             oss_client.bucket.put_object_from_file(oss_key, audio_path)
             audio_url = f"https://{oss_client.bucket_name}.{oss_client.endpoint}/{oss_key}"
         else:
-            audio_url = f"/uploads/audio_{edit_id}.mp3"
+            # 使用带时间戳的文件名
+            audio_url = f"/uploads/audio_{edit_id}_{timestamp}.mp3"
         
         # 清理临时文件
         if os.path.exists(local_video_path) and 'temp_' in local_video_path:
-            os.remove(local_video_path)
+            try:
+                os.remove(local_video_path)
+            except Exception as e:
+                logger.warning(f"清理临时视频文件失败: {e}")
         if os.path.exists(audio_path):
-            os.remove(audio_path)
+            try:
+                os.remove(audio_path)
+            except Exception as e:
+                logger.warning(f"清理临时音频文件失败: {e}")
         
         logger.info(f"音频提取完成: {audio_url}")
         return audio_url
@@ -499,7 +514,26 @@ def process_asr_task(task_id: str, file_url: str, edit_id: str = None, user_id: 
                     # ASR完成，立即标记完成并返回结果
                     asr_tasks[task_id]['status'] = 'completed'
                     asr_tasks[task_id]['result'] = frontend_data
-                    logger.info(f"ASR任务 {task_id} 完成，开始后台视频分割")
+                    logger.info(f"ASR任务 {task_id} 完成，开始后台视频分割和DeepSeek提取")
+                    
+                    # 启动DeepSeek异步提取标题和关键词
+                    sentences_count = len(frontend_data.get('sentences', []))
+                    logger.info(f"[ASR] 准备启动DeepSeek提取，sentences数量: {sentences_count}")
+                    if frontend_data.get('sentences'):
+                        logger.info(f"[ASR] 正在调用async_extract_title_and_keywords，task_id={task_id}")
+                        try:
+                            async_extract_title_and_keywords(task_id, frontend_data['sentences'])
+                            logger.info(f"[ASR] async_extract_title_and_keywords调用完成")
+                            # 立即检查状态是否被设置
+                            if task_id in asr_tasks:
+                                current_status = asr_tasks[task_id].get('extract_status', 'NOT_SET')
+                                logger.info(f"[ASR] 调用后extract_status: {current_status}")
+                        except Exception as e:
+                            logger.error(f"[ASR] 调用async_extract_title_and_keywords失败: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    else:
+                        logger.warning(f"[ASR] 没有sentences，跳过DeepSeek提取")
                     
                     # 如果有edit_id和user_id，在后台线程中切分视频片段
                     # 这样ASR结果可以立即返回给前端，视频分割在后台进行
@@ -557,3 +591,171 @@ def process_asr_task(task_id: str, file_url: str, edit_id: str = None, user_id: 
     thread = threading.Thread(target=_process)
     thread.daemon = True
     thread.start()
+
+
+# ==================== DeepSeek 标题/关键词提取 ====================
+
+def extract_title_and_keywords_with_deepseek(sentences: List[Dict]) -> Dict:
+    """
+    使用DeepSeek从ASR结果中提取标题和关键词
+
+    Args:
+        sentences: ASR识别出的句子列表
+
+    Returns:
+        {'title': str, 'keywords': List[str]}
+    """
+    logger.info("=" * 50)
+    logger.info("[DeepSeek] 开始提取标题和关键词")
+    logger.info(f"[DeepSeek] 句子数量: {len(sentences)}")
+
+    try:
+        # 构建文本内容
+        text_content = "\n".join([s.get('text', '') for s in sentences if s.get('text')])
+
+        if not text_content:
+            logger.warning("[DeepSeek] 没有文本内容可供提取")
+            return {'title': '', 'keywords': []}
+
+        logger.info(f"[DeepSeek] 文本长度: {len(text_content)} 字符")
+
+        # 限制文本长度（DeepSeek有token限制）
+        if len(text_content) > 3000:
+            text_content = text_content[:3000] + "..."
+            logger.info("[DeepSeek] 文本已截断至3000字符")
+
+        # 构建prompt
+        prompt = f"""请从以下视频字幕内容中提取：
+1. 一个吸引人的标题（不超过20字）
+2. 5个关键词（用逗号分隔）
+
+字幕内容：
+{text_content}
+
+请按以下格式返回：
+标题：xxx
+关键词：xxx, xxx, xxx, xxx, xxx"""
+
+        headers = {
+            'Authorization': f'Bearer {DEEPSEEK_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+
+        data = {
+            'model': 'deepseek-chat',
+            'messages': [
+                {'role': 'user', 'content': prompt}
+            ],
+            'temperature': 0.7,
+            'max_tokens': 200
+        }
+
+        logger.info("[DeepSeek] 正在调用API...")
+        response = requests.post(DEEPSEEK_API_URL, headers=headers, json=data, timeout=30)
+        logger.info(f"[DeepSeek] API响应状态码: {response.status_code}")
+
+        result = response.json()
+        logger.info(f"[DeepSeek] API返回结果: {json.dumps(result, ensure_ascii=False)[:500]}")
+
+        if 'choices' not in result or not result['choices']:
+            logger.error(f"[DeepSeek] 返回无效结果: {result}")
+            return {'title': '', 'keywords': []}
+
+        content = result['choices'][0]['message']['content']
+        logger.info(f"[DeepSeek] 原始响应内容:\n{content}")
+
+        # 解析结果
+        title = ''
+        keywords = []
+
+        for line in content.split('\n'):
+            line = line.strip()
+            if line.startswith('标题：') or line.startswith('标题:'):
+                title = line.replace('标题：', '').replace('标题:', '').strip()
+            elif line.startswith('关键词：') or line.startswith('关键词:'):
+                keywords_text = line.replace('关键词：', '').replace('关键词:', '').strip()
+                keywords = [k.strip() for k in keywords_text.split(',') if k.strip()]
+
+        logger.info(f"[DeepSeek] 提取完成: 标题='{title}', 关键词={keywords}")
+        logger.info("=" * 50)
+        return {'title': title, 'keywords': keywords[:5]}  # 最多5个关键词
+
+    except Exception as e:
+        logger.error(f"[DeepSeek] 提取失败: {e}")
+        import traceback
+        traceback.print_exc()
+        logger.info("=" * 50)
+        return {'title': '', 'keywords': []}
+
+
+def async_extract_title_and_keywords(task_id: str, sentences: List[Dict]):
+    """
+    异步调用DeepSeek提取标题和关键词，存入ASR任务结果
+    
+    Args:
+        task_id: ASR任务ID
+        sentences: 句子列表
+    """
+    def _extract():
+        try:
+            logger.info(f"[DeepSeek异步] 开始提取任务: {task_id}")
+            
+            # 检查任务是否存在
+            if task_id not in asr_tasks:
+                logger.error(f"[DeepSeek异步] 任务 {task_id} 不存在，无法提取")
+                return
+            
+            # 调用DeepSeek提取
+            result = extract_title_and_keywords_with_deepseek(sentences)
+            
+            # 再次检查任务是否存在（可能被清理）
+            if task_id not in asr_tasks:
+                logger.warning(f"[DeepSeek异步] 任务 {task_id} 已不存在，丢弃提取结果")
+                return
+            
+            # 存入ASR任务结果
+            if 'result' not in asr_tasks[task_id]:
+                asr_tasks[task_id]['result'] = {}
+            if 'metadata' not in asr_tasks[task_id]['result']:
+                asr_tasks[task_id]['result']['metadata'] = {}
+            
+            asr_tasks[task_id]['result']['metadata']['title'] = result['title']
+            asr_tasks[task_id]['result']['metadata']['keywords'] = result['keywords']
+            asr_tasks[task_id]['extract_status'] = 'completed'
+            
+            # 注意：后台线程无法直接操作Flask数据库
+            # 结果只存入内存，等前端查询时再通过API保存到数据库
+            logger.info(f"[DeepSeek异步] 提取结果已存入内存: {task_id}")
+            
+            logger.info(f"[DeepSeek异步] 提取完成: 标题='{result['title']}', 关键词={result['keywords']}")
+                
+        except Exception as e:
+            logger.error(f"[DeepSeek异步] 提取失败: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            if task_id in asr_tasks:
+                asr_tasks[task_id]['extract_status'] = 'failed'
+                asr_tasks[task_id]['extract_error'] = str(e)
+    
+    # 检查任务是否存在
+    if task_id not in asr_tasks:
+        logger.error(f"[DeepSeek异步] 任务 {task_id} 不存在，无法启动提取")
+        return
+    
+    # 立即标记为处理中
+    asr_tasks[task_id]['extract_status'] = 'processing'
+    asr_tasks[task_id]['extract_start_time'] = time.time()
+    
+    logger.info(f"[DeepSeek异步] 即将启动后台线程，task_id={task_id}")
+    
+    # 启动后台线程
+    try:
+        extract_thread = threading.Thread(target=_extract, name=f"DeepSeek-{task_id}")
+        extract_thread.daemon = True
+        extract_thread.start()
+        logger.info(f"[DeepSeek异步] 后台线程已启动: {extract_thread.name}, alive={extract_thread.is_alive()}")
+    except Exception as e:
+        logger.error(f"[DeepSeek异步] 启动线程失败: {e}")
+        asr_tasks[task_id]['extract_status'] = 'failed'
+        asr_tasks[task_id]['extract_error'] = f'启动线程失败: {str(e)}'

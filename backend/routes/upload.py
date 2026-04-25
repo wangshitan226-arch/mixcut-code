@@ -166,15 +166,22 @@ def upload_file():
         thread.daemon = True
         thread.start()
         
+        # 构建返回数据
+        # 本地URL用于前端缓存到浏览器本地存储（WebCodecs预览用）
+        local_url = f'/uploads/{filename}'
+        
         return jsonify({
             'id': material_id,
             'type': 'video' if is_video else 'image',
-            'url': f'/uploads/{filename}',
+            'url': local_url,                    # 本地URL（给前端缓存用）
             'thumbnail': f'/uploads/thumbnails/{thumbnail_filename}',
             'duration': duration,
             'originalName': file.filename,
             'transcode_task_id': task_id,
-            'transcode_status': 'processing'
+            'transcode_status': 'processing',
+            # 新增字段：用于前端识别和缓存
+            'local_url': local_url,              # 本地文件URL
+            'can_cache': True,                   # 是否可以缓存到浏览器
         })
         
     except Exception as e:
@@ -213,3 +220,145 @@ def get_transcode_status(task_id):
         })
     
     return jsonify({'error': '任务不存在'}), 404
+
+
+@upload_bp.route('/materials/<material_id>/download', methods=['GET'])
+def download_material(material_id):
+    """
+    下载素材文件（用于前端缓存到浏览器本地存储）
+    
+    这个接口允许前端下载完整的视频文件，然后缓存到 IndexedDB/OPFS 中，
+    实现零延迟的本地播放。
+    """
+    try:
+        material = Material.query.get(material_id)
+        if not material:
+            return jsonify({'error': '素材不存在'}), 404
+        
+        # 检查文件是否存在
+        if not os.path.exists(material.file_path):
+            return jsonify({'error': '文件不存在'}), 404
+        
+        # 返回文件
+        from flask import send_file
+        return send_file(
+            material.file_path,
+            as_attachment=False,  # 不作为附件下载，直接播放
+            mimetype='video/mp4'
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@upload_bp.route('/materials/metadata', methods=['POST'])
+def upload_material_metadata():
+    """
+    上传素材元数据（客户端渲染模式）
+    
+    当客户端渲染开启时，视频文件在浏览器本地处理（转码、存储），
+    前端只上传素材的元数据到服务器，服务器不需要存储视频文件。
+    
+    请求参数：
+    - user_id: 用户ID
+    - shot_id: 镜头ID
+    - material_id: 客户端生成的素材ID
+    - duration: 视频时长（秒）
+    - width: 视频宽度
+    - height: 视频高度
+    - file_size: 文件大小（字节）
+    - is_local: 是否为本地素材（固定为true）
+    - thumbnail: 缩略图文件（可选）
+    """
+    try:
+        user_id = request.form.get('user_id')
+        shot_id = request.form.get('shot_id')
+        material_id = request.form.get('material_id')
+        duration = request.form.get('duration', '0')
+        width = request.form.get('width')
+        height = request.form.get('height')
+        file_size = request.form.get('file_size', '0')
+        
+        if not user_id:
+            return jsonify({'error': '没有指定用户ID'}), 400
+        if not shot_id:
+            return jsonify({'error': '没有指定镜头ID'}), 400
+        if not material_id:
+            return jsonify({'error': '没有指定素材ID'}), 400
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        try:
+            shot_id = int(shot_id)
+        except ValueError:
+            return jsonify({'error': '无效的镜头ID'}), 400
+        
+        shot = Shot.query.get(shot_id)
+        if not shot or shot.user_id != user_id:
+            return jsonify({'error': '镜头不存在或无权限'}), 404
+        
+        # 处理缩略图上传
+        thumbnail_path = None
+        if 'thumbnail' in request.files:
+            thumbnail_file = request.files['thumbnail']
+            if thumbnail_file and thumbnail_file.filename:
+                thumbnail_filename = f"{material_id}_thumb.jpg"
+                thumbnail_path = os.path.join(THUMBNAIL_FOLDER, thumbnail_filename)
+                thumbnail_file.save(thumbnail_path)
+        
+        # 如果没有上传缩略图，生成一个默认的
+        if not thumbnail_path:
+            thumbnail_filename = f"{material_id}_thumb.jpg"
+            thumbnail_path = os.path.join(THUMBNAIL_FOLDER, thumbnail_filename)
+            # 创建一个空的占位缩略图（前端应该上传缩略图）
+            # 这里简单处理：复制一个默认缩略图或留空
+            # 实际使用时前端应该上传缩略图
+        
+        # 转换时长为字符串格式
+        duration_seconds = float(duration)
+        minutes = int(duration_seconds // 60)
+        seconds = int(duration_seconds % 60)
+        duration_str = f"{minutes}:{seconds:02d}"
+        
+        # 创建素材记录（标记为本地素材）
+        material = Material(
+            id=material_id,
+            user_id=user_id,
+            shot_id=shot_id,
+            type='video',
+            original_name='local_video.mp4',
+            file_path='local',  # 本地素材，文件路径标记为 local
+            unified_path='local',  # 本地素材已转码，标记为 local
+            thumbnail_path=thumbnail_path,
+            duration=duration_str,
+            duration_seconds=duration_seconds,
+            is_local=True,
+            local_material_id=material_id,
+            width=int(width) if width else None,
+            height=int(height) if height else None,
+            file_size=int(file_size) if file_size else None
+        )
+        db.session.add(material)
+        db.session.commit()
+        
+        # 清除用户的旧渲染结果
+        from utils.cleanup import clear_all_user_renders
+        clear_all_user_renders(user_id)
+        
+        return jsonify({
+            'id': material_id,
+            'type': 'video',
+            'url': 'local',  # 本地素材没有服务器URL
+            'thumbnail': f'/uploads/thumbnails/{thumbnail_filename}' if thumbnail_path else None,
+            'duration': duration_str,
+            'originalName': 'local_video.mp4',
+            'is_local': True,
+            'transcode_status': 'completed',  # 本地素材已完成转码
+            'message': '素材元数据已保存（客户端本地渲染）'
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500

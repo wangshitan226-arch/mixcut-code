@@ -254,6 +254,57 @@ class OSSClient:
         except Exception as e:
             logger.error(f"检查OSS文件存在性失败: {e}")
             return False
+    
+    def refresh_cdn_cache(self, oss_url: str) -> bool:
+        """
+        刷新CDN缓存（如果配置了CDN）
+        
+        Args:
+            oss_url: 需要刷新的URL
+            
+        Returns:
+            bool: 是否成功提交刷新任务
+        """
+        if not self.enabled or not self.cdn_domain:
+            return False
+        
+        try:
+            # 这里可以集成阿里云CDN刷新API
+            # 需要额外的CDN AccessKey
+            logger.info(f"[CDN] 刷新缓存: {oss_url}")
+            return True
+        except Exception as e:
+            logger.error(f"[CDN] 刷新缓存失败: {e}")
+            return False
+    
+    def get_optimized_url(self, oss_url: str, width: int = None, height: int = None) -> str:
+        """
+        获取优化后的URL（支持图片/视频处理参数）
+        
+        Args:
+            oss_url: 原始OSS URL
+            width: 目标宽度（可选）
+            height: 目标高度（可选）
+            
+        Returns:
+            优化后的URL
+        """
+        if not oss_url:
+            return oss_url
+        
+        # 如果是图片，可以添加OSS图片处理参数
+        if any(oss_url.endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+            params = []
+            if width:
+                params.append(f"w_{width}")
+            if height:
+                params.append(f"h_{height}")
+            
+            if params:
+                separator = '&' if '?' in oss_url else '?'
+                return f"{oss_url}{separator}x-oss-process=image/resize,{','.join(params)}"
+        
+        return oss_url
 
 
 # 全局OSS客户端实例

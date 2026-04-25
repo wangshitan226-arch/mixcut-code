@@ -12,11 +12,14 @@ import uuid
 import threading
 import json
 import time
+import logging
 from models import User, Render, Material
 from extensions import db, render_tasks
 from config import RENDERS_FOLDER
 from utils import fast_concat_videos
 from utils.oss import oss_client
+
+logger = logging.getLogger(__name__)
 
 renders_bp = Blueprint('renders', __name__, url_prefix='/api')
 
@@ -44,7 +47,7 @@ def update_render_oss_url(combo_id, oss_url, app):
             db.session.rollback()
 
 
-def fast_concat_task(task_id, combo_id, unified_files, output_path, user_id=None, app=None):
+def fast_concat_task(task_id, combo_id, unified_files, output_path, user_id=None, app=None, quality='medium'):
     """
     Fast concat using -c copy
     优化：合成后保存本地文件，后台异步上传OSS
@@ -66,7 +69,8 @@ def fast_concat_task(task_id, combo_id, unified_files, output_path, user_id=None
         
         try:
             render_tasks[task_id]['progress'] = 50
-            success = fast_concat_videos(unified_files, output_path)
+            # 传入质量参数以控制输出码率
+            success = fast_concat_videos(unified_files, output_path, quality=quality)
             
             if success and os.path.exists(output_path):
                 # 立即返回本地URL（用户流畅预览）
@@ -204,6 +208,80 @@ def get_renders():
             combinations.append(combo_data)
         
         return jsonify({'combinations': combinations})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@renders_bp.route('/video/<combo_id>/preview', methods=['GET'])
+def get_preview_video(combo_id):
+    """
+    获取优化后的预览视频（低码率版本）
+    用于服务器部署后的流畅播放
+    """
+    try:
+        render = Render.query.get(combo_id)
+        if not render:
+            return jsonify({'error': '视频不存在'}), 404
+        
+        # 检查是否已有低码率预览版本
+        preview_filename = f"preview_{combo_id}.mp4"
+        preview_path = os.path.join(RENDERS_FOLDER, preview_filename)
+        
+        # 如果预览版已存在，直接返回
+        if os.path.exists(preview_path):
+            return jsonify({
+                'status': 'completed',
+                'video_url': f'/renders/{preview_filename}',
+                'type': 'preview'
+            })
+        
+        # 检查原视频是否存在
+        if not render.file_path or not os.path.exists(render.file_path):
+            return jsonify({'error': '原视频不存在'}), 404
+        
+        # 异步生成低码率预览版
+        task_id = f"preview_{uuid.uuid4().hex[:8]}"
+        app = current_app._get_current_object()
+        
+        def generate_preview():
+            with app.app_context():
+                try:
+                    from utils.video import transcode_to_unified
+                    
+                    cmd = [
+                        'ffmpeg', '-y',
+                        '-i', render.file_path,
+                        '-c:v', 'libx264',
+                        '-preset', 'superfast',
+                        '-crf', '28',  # 更高压缩率
+                        '-maxrate', '1M',  # 限制码率1Mbps
+                        '-bufsize', '1M',
+                        '-vf', 'scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2',
+                        '-c:a', 'aac',
+                        '-b:a', '96k',
+                        '-movflags', '+faststart',
+                        preview_path
+                    ]
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        print(f"[Preview] 生成成功: {preview_path}")
+                    else:
+                        print(f"[Preview] 生成失败: {result.stderr}")
+                except Exception as e:
+                    print(f"[Preview] 异常: {e}")
+        
+        thread = threading.Thread(target=generate_preview)
+        thread.daemon = True
+        thread.start()
+        
+        # 返回原视频URL，预览版生成后下次请求会返回
+        return jsonify({
+            'status': 'processing',
+            'video_url': f'/renders/{os.path.basename(render.file_path)}',
+            'message': '预览版生成中，请稍后刷新'
+        })
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -354,6 +432,153 @@ def download_combination(combo_id):
         }), 404
         
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@renders_bp.route('/proxy/video', methods=['GET'])
+def proxy_video():
+    """
+    代理下载视频文件（解决CORS跨域问题）
+    支持Range请求（206 Partial Content）实现边下边播
+    
+    参数: url - 要代理下载的视频URL
+    用于前端缓存视频到浏览器本地存储
+    """
+    try:
+        video_url = request.args.get('url')
+        if not video_url:
+            return jsonify({'error': '缺少url参数'}), 400
+        
+        from flask import Response
+        
+        logger.info(f"[Proxy] 开始代理下载视频: {video_url}")
+        
+        # 获取Range请求头（用于边下边播）
+        range_header = request.headers.get('Range')
+        
+        # 判断是本地文件还是远程URL
+        if video_url.startswith('http://localhost:3002') or video_url.startswith('/renders/'):
+            # 本地文件，直接读取
+            if video_url.startswith('http://localhost:3002'):
+                file_path = video_url.replace('http://localhost:3002', '')
+            else:
+                file_path = video_url
+            
+            file_name = os.path.basename(file_path)
+            full_path = os.path.join(RENDERS_FOLDER, file_name)
+            
+            if not os.path.exists(full_path):
+                # 尝试查找匹配的文件（忽略大小写）
+                if os.path.exists(RENDERS_FOLDER):
+                    for f in os.listdir(RENDERS_FOLDER):
+                        if f.lower() == file_name.lower():
+                            full_path = os.path.join(RENDERS_FOLDER, f)
+                            file_name = f
+                            break
+                    else:
+                        return jsonify({'error': f'文件不存在: {file_name}'}), 404
+            
+            file_size = os.path.getsize(full_path)
+            
+            # 处理Range请求（支持边下边播）
+            if range_header:
+                byte_range = range_header.replace('bytes=', '').split('-')
+                start = int(byte_range[0]) if byte_range[0] else 0
+                end = int(byte_range[1]) if byte_range[1] else file_size - 1
+                length = end - start + 1
+                
+                def generate_range():
+                    with open(full_path, 'rb') as f:
+                        f.seek(start)
+                        remaining = length
+                        while remaining > 0:
+                            chunk_size = min(8192, remaining)
+                            chunk = f.read(chunk_size)
+                            if not chunk:
+                                break
+                            yield chunk
+                            remaining -= len(chunk)
+                
+                logger.info(f"[Proxy] Range请求: {start}-{end}/{file_size}")
+                
+                return Response(
+                    generate_range(),
+                    status=206,  # Partial Content
+                    mimetype='video/mp4',
+                    headers={
+                        'Content-Disposition': f'inline; filename="{file_name}"',
+                        'Access-Control-Allow-Origin': '*',
+                        'Content-Range': f'bytes {start}-{end}/{file_size}',
+                        'Content-Length': str(length),
+                        'Accept-Ranges': 'bytes',
+                    }
+                )
+            
+            # 完整文件请求
+            def generate_local():
+                with open(full_path, 'rb') as f:
+                    while True:
+                        chunk = f.read(8192)
+                        if not chunk:
+                            break
+                        yield chunk
+            
+            logger.info(f"[Proxy] 本地文件代理成功: {file_name}, 大小: {file_size}")
+            
+            return Response(
+                generate_local(),
+                mimetype='video/mp4',
+                headers={
+                    'Content-Disposition': f'inline; filename="{file_name}"',
+                    'Access-Control-Allow-Origin': '*',
+                    'Content-Length': str(file_size),
+                    'Accept-Ranges': 'bytes',
+                }
+            )
+        else:
+            # 远程URL（如OSS），通过requests代理
+            import requests
+            
+            # 转发Range头到远程服务器
+            headers = {}
+            if range_header:
+                headers['Range'] = range_header
+            
+            response = requests.get(video_url, stream=True, timeout=120, headers=headers)
+            response.raise_for_status()
+            
+            content_type = response.headers.get('Content-Type', 'video/mp4')
+            content_length = response.headers.get('Content-Length')
+            content_range = response.headers.get('Content-Range')
+            
+            resp_headers = {
+                'Content-Disposition': 'inline',
+                'Access-Control-Allow-Origin': '*',
+                'Accept-Ranges': 'bytes',
+            }
+            if content_length:
+                resp_headers['Content-Length'] = content_length
+            if content_range:
+                resp_headers['Content-Range'] = content_range
+            
+            def generate_remote():
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
+            
+            logger.info(f"[Proxy] 远程视频代理成功")
+            
+            return Response(
+                generate_remote(),
+                status=response.status_code,
+                mimetype=content_type,
+                headers=resp_headers
+            )
+        
+    except Exception as e:
+        import traceback
+        logger.error(f"[Proxy] 代理下载视频失败: {e}")
+        logger.error(f"[Proxy] 详细错误: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 

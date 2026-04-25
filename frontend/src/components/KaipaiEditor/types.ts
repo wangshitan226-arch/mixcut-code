@@ -33,6 +33,7 @@ export interface EditModalProps {
 }
 
 export interface SegmentItemProps {
+  key?: number;
   segment: Segment;
   isSelected: boolean;
   onToggle: (id: string) => void;

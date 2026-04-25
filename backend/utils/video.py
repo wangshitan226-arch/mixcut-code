@@ -115,10 +115,29 @@ def format_duration(seconds):
     return f"{mins}:{secs:02d}"
 
 
-def fast_concat_videos(unified_files, output_path):
-    """Fast concat videos using ffmpeg concat demuxer"""
+def fast_concat_videos(unified_files, output_path, quality='medium', target_bitrate=None):
+    """
+    Fast concat videos using ffmpeg concat demuxer
+    
+    Args:
+        unified_files: 输入文件列表
+        output_path: 输出路径
+        quality: 质量等级 ('low', 'medium', 'high', 'ultra')
+        target_bitrate: 目标视频码率 (如 '2M', '4M')，None则使用默认值
+    """
     if not unified_files:
         return False
+    
+    # 默认码率设置 (适合网络播放)
+    bitrate_settings = {
+        'low': '1.5M',      # 720p
+        'medium': '3M',     # 1080p  
+        'high': '5M',       # 1440p
+        'ultra': '8M'       # 4K
+    }
+    
+    # 使用传入的码率或根据质量选择
+    video_bitrate = target_bitrate or bitrate_settings.get(quality, '3M')
     
     files_with_audio = []
     for filepath in unified_files:
@@ -139,18 +158,25 @@ def fast_concat_videos(unified_files, output_path):
     
     try:
         if all_have_audio:
-            # 重新编码音频为AAC格式，确保兼容性
+            # 优化：使用H.264编码 + 限制码率 + faststart优化网络播放
             cmd = [
                 'ffmpeg', '-y',
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', list_file,
-                '-c:v', 'copy',
+                '-c:v', 'libx264',          # 使用H.264编码（兼容性最好）
+                '-preset', 'veryfast',       # 编码速度优先
+                '-crf', '23',                # 质量设置
+                '-maxrate', video_bitrate,   # 限制最大码率
+                '-bufsize', '2M',            # 缓冲区大小
+                '-pix_fmt', 'yuv420p',       # 确保兼容性
+                '-profile:v', 'baseline',    # 基线配置文件（最大兼容性）
+                '-level', '3.0',             # 兼容性级别
                 '-c:a', 'aac',
                 '-b:a', '128k',
                 '-ar', '44100',
                 '-ac', '2',
-                '-movflags', '+faststart',
+                '-movflags', '+faststart',   # 优化网络播放（moov前置）
                 output_path
             ]
         else:
@@ -189,18 +215,25 @@ def fast_concat_videos(unified_files, output_path):
                         abs_path = os.path.abspath(filepath)
                         f.write(f"file '{abs_path}'\n")
                 
-                # 重新编码音频为AAC格式，确保兼容性
+                # 优化：使用H.264编码 + 限制码率 + faststart优化网络播放
                 cmd = [
                     'ffmpeg', '-y',
                     '-f', 'concat',
                     '-safe', '0',
                     '-i', list_file,
-                    '-c:v', 'copy',
+                    '-c:v', 'libx264',          # 使用H.264编码（兼容性最好）
+                    '-preset', 'veryfast',       # 编码速度优先
+                    '-crf', '23',                # 质量设置
+                    '-maxrate', video_bitrate,   # 限制最大码率
+                    '-bufsize', '2M',            # 缓冲区大小
+                    '-pix_fmt', 'yuv420p',       # 确保兼容性
+                    '-profile:v', 'baseline',    # 基线配置文件（最大兼容性）
+                    '-level', '3.0',             # 兼容性级别
                     '-c:a', 'aac',
                     '-b:a', '128k',
                     '-ar', '44100',
                     '-ac', '2',
-                    '-movflags', '+faststart',
+                    '-movflags', '+faststart',   # 优化网络播放（moov前置）
                     output_path
                 ]
             finally:

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronLeft, Scissors, FileText, Clock, MoreVertical, Trash2, Edit3 } from 'lucide-react';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
 
 interface HomeScreenProps {
   onNavigate: () => void;

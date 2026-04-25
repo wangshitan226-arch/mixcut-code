@@ -1,8 +1,17 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { ChevronLeft, CheckCircle2, Circle, Clock, Download, Play, Loader2, Pause, Square, Scissors } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { ChevronLeft, CheckCircle2, Circle, Clock, Download, Play, Loader2, Pause, Square, Scissors, Cpu } from 'lucide-react';
 import KaipaiEditor from './KaipaiEditor';
+import OptimizedVideoPlayer from './OptimizedVideoPlayer';
+import { saveVideo, getVideo, hasVideoInLocal, initPreloadManager, preloadManager } from '../utils/videoCache';
+import { useClientRendering } from '../hooks/useClientRendering';
+import { renderPreviewFromFiles, releaseBlobUrl } from '../utils/clientRenderer';
+import { exportCombination, uploadToOSS } from '../utils/clientExport';
+import { uploadToOSSDirect } from '../utils/ossUpload';
+import { generateCombinations, convertServerMaterials, groupMaterialsByShot } from '../utils/combinationGenerator';
+import { loadMaterial } from '../utils/opfs';
+import { loadMaterialFromIndexedDB } from '../utils/indexedDB';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
 
 interface Material {
   id: string;
@@ -45,22 +54,31 @@ interface ResultsScreenProps {
   defaultQuality?: 'low' | 'medium' | 'high' | 'ultra';
 }
 
-export default function ResultsScreen({ 
-  onBack, 
+export default function ResultsScreen({
+  onBack,
   combinations: initialCombinations,
-  defaultQuality = 'medium' 
+  defaultQuality = 'medium'
 }: ResultsScreenProps) {
   const [results, setResults] = useState<ResultItem[]>([]);
   const [activeFilter, setActiveFilter] = useState(FILTERS[0]);
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [previewProgress, setPreviewProgress] = useState({ completed: 0, total: 0 });
-  
+
   // Kaipai Editor state
   const [showKaipaiEditor, setShowKaipaiEditor] = useState(false);
   const [kaipaiEditId, setKaipaiEditId] = useState<string>('');
   const [kaipaiVideoUrl, setKaipaiVideoUrl] = useState<string>('');
   const [kaipaiLoadingId, setKaipaiLoadingId] = useState<string | null>(null);
+
+  // 本地缓存状态
+  const [cachedVideos, setCachedVideos] = useState<Set<string>>(new Set());
+  const downloadingRef = useRef<Set<string>>(new Set());
+
+  // 客户端渲染状态
+  const { state: clientRenderState } = useClientRendering();
+  const [clientRenderedVideos, setClientRenderedVideos] = useState<Map<string, string>>(new Map());
+  const [showClientRenderPanel, setShowClientRenderPanel] = useState(false);
 
   // Initialize results from props
   useEffect(() => {
@@ -78,8 +96,112 @@ export default function ResultsScreen({
       }));
       setResults(items);
       setPreviewProgress({ completed: 0, total: items.length });
+
+      // 检查哪些视频已经缓存到本地
+      checkCachedVideos(items);
+      
+      // 初始化预加载管理器
+      initPreloadManager(API_BASE_URL);
+      
+      // 智能预加载：优先预加载前3个未缓存的视频
+      const videosToPreload = items
+        .filter(item => item.preview_status === 'completed' && item.preview_url)
+        .slice(0, 3);
+      
+      videosToPreload.forEach((item, index) => {
+        if (preloadManager) {
+          preloadManager.addToQueue(item.id, item.preview_url!, 3 - index);
+        }
+      });
     }
   }, [initialCombinations]);
+
+  // 检查已缓存的视频
+  const checkCachedVideos = async (items: ResultItem[]) => {
+    const cached = new Set<string>();
+    for (const item of items) {
+      if (item.preview_url) {
+        const isCached = await hasVideoInLocal(item.id);
+        if (isCached) {
+          cached.add(item.id);
+        }
+      }
+    }
+    setCachedVideos(cached);
+    console.log('[ResultsScreen] 已缓存视频:', cached.size, '个');
+  };
+
+  // 缓存视频到本地
+  const cacheVideo = async (item: ResultItem) => {
+    // 防止重复下载
+    if (downloadingRef.current.has(item.id)) {
+      console.log('[缓存] 下载正在进行中:', item.id);
+      return;
+    }
+
+    // 检查是否已缓存
+    const isCached = await hasVideoInLocal(item.id);
+    if (isCached) {
+      console.log('[缓存] 视频已在本地:', item.id);
+      setCachedVideos(prev => new Set(prev).add(item.id));
+      return;
+    }
+
+    if (!item.preview_url) {
+      console.log('[缓存] 无视频URL:', item.id);
+      return;
+    }
+
+    try {
+      downloadingRef.current.add(item.id);
+      console.log('[缓存] 开始下载视频:', item.id);
+
+      // 构建完整的视频URL
+      let fullVideoUrl: string;
+      if (item.preview_url.startsWith('blob:')) {
+        // Blob URL 是本地生成的，直接下载
+        fullVideoUrl = item.preview_url;
+      } else if (item.preview_url.startsWith('http')) {
+        fullVideoUrl = item.preview_url;
+      } else {
+        fullVideoUrl = `${API_BASE_URL}${item.preview_url}`;
+      }
+      
+      // Blob URL 直接下载，不需要代理
+      let videoDownloadUrl: string;
+      if (fullVideoUrl.startsWith('blob:')) {
+        videoDownloadUrl = fullVideoUrl;
+      } else {
+        // 使用后端代理接口避免CORS（无论是OSS还是本地文件）
+        videoDownloadUrl = `${API_BASE_URL}/api/proxy/video?url=${encodeURIComponent(fullVideoUrl)}`;
+      }
+
+      // 下载视频文件
+      const response = await fetch(videoDownloadUrl);
+      if (!response.ok) {
+        throw new Error('下载视频失败');
+      }
+
+      const blob = await response.blob();
+      
+      // 检查blob大小
+      if (blob.size === 0) {
+        throw new Error('下载的视频为空');
+      }
+      
+      const file = new File([blob], `${item.id}.mp4`, { type: 'video/mp4' });
+
+      // 保存到本地
+      await saveVideo(item.id, file, item.preview_url || '');
+      console.log('[缓存] 视频已缓存到本地:', item.id, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
+
+      setCachedVideos(prev => new Set(prev).add(item.id));
+    } catch (err) {
+      console.error('[缓存] 缓存视频失败:', err);
+    } finally {
+      downloadingRef.current.delete(item.id);
+    }
+  };
 
 
 
@@ -166,44 +288,136 @@ export default function ResultsScreen({
     });
   };
 
+  // 从本地存储加载素材文件
+  const loadLocalMaterialFiles = async (materials: Material[]): Promise<File[]> => {
+    const files: File[] = [];
+    for (const material of materials) {
+      let file: File | null = null;
+      // 优先从 OPFS 加载
+      try {
+        const opfsResult = await loadMaterial(material.id);
+        if (opfsResult.video) {
+          file = opfsResult.video;
+        }
+      } catch {
+        // OPFS 加载失败，尝试 IndexedDB
+      }
+      if (!file) {
+        try {
+          const idbResult = await loadMaterialFromIndexedDB(material.id);
+          if (idbResult.video) {
+            file = new File([idbResult.video], `${material.id}.mp4`, { type: 'video/mp4' });
+          }
+        } catch {
+          // IndexedDB 也失败
+        }
+      }
+      if (file) {
+        files.push(file);
+      }
+    }
+    return files;
+  };
+
+  // 客户端渲染预览
+  const clientRenderPreview = async (item: ResultItem): Promise<string | null> => {
+    try {
+      console.log('[ResultsScreen] ====== 尝试客户端渲染预览 ======');
+      console.log('[ResultsScreen] 组合ID:', item.id, '素材数:', item.materials.length);
+
+      // 检查是否已有客户端渲染结果
+      if (clientRenderedVideos.has(item.id)) {
+        console.log('[ResultsScreen] 使用缓存的客户端渲染结果');
+        return clientRenderedVideos.get(item.id) || null;
+      }
+
+      // 加载本地素材文件
+      console.log('[ResultsScreen] 从本地存储加载素材...');
+      const files = await loadLocalMaterialFiles(item.materials);
+      console.log('[ResultsScreen] 本地素材加载结果:', files.length, '/', item.materials.length, '个');
+
+      if (files.length === 0) {
+        console.warn('[ResultsScreen] 没有本地素材，降级到服务器渲染');
+        return null;
+      }
+
+      // 客户端秒级拼接
+      console.log('[ResultsScreen] 开始客户端秒级拼接...');
+      const startTime = performance.now();
+      const result = await renderPreviewFromFiles(files, {
+        renderId: `result_${item.id}`,
+        onProgress: (progress, stage) => {
+          console.log(`[ResultsScreen] 拼接进度: ${progress}% - ${stage}`);
+        },
+      });
+      const duration = performance.now() - startTime;
+      console.log('[ResultsScreen] 客户端拼接完成，耗时:', duration.toFixed(0), 'ms');
+
+      // 保存渲染结果
+      setClientRenderedVideos(prev => new Map(prev).set(item.id, result.blobUrl));
+      console.log('[ResultsScreen] ====== 客户端渲染预览成功 ======');
+      return result.blobUrl;
+    } catch (error) {
+      console.error('[ResultsScreen] 客户端渲染失败:', error);
+      return null;
+    }
+  };
+
   const handlePlay = useCallback(async (item: ResultItem) => {
     // If already playing, stop
     if (playingId === item.id) {
       setPlayingId(null);
       return;
     }
-    
-    // If already has video URL, play directly
+
+    // If already has video URL, play directly (and cache in background)
     if (item.preview_status === 'completed' && item.preview_url) {
       setPlayingId(item.id);
+      // 后台缓存视频
+      cacheVideo(item);
       return;
     }
-    
+
     // For pending items: show player immediately, generate in background
     if (item.preview_status === 'pending' || item.preview_status === 'failed') {
       // Set a temporary loading state for this item
-      setResults(prev => prev.map(r => 
+      setResults(prev => prev.map(r =>
         r.id === item.id ? { ...r, preview_status: 'loading' } : r
       ));
       setPlayingId(item.id);
-      
-      // Trigger concat in background
-      triggerConcat(item).then(videoUrl => {
-        if (videoUrl) {
-          // Video ready, update status (player will auto-load)
-          setResults(prev => prev.map(r => 
-            r.id === item.id ? { ...r, preview_status: 'completed', preview_url: videoUrl } : r
-          ));
-        } else {
-          // Failed, show error
-          setResults(prev => prev.map(r => 
-            r.id === item.id ? { ...r, preview_status: 'failed' } : r
-          ));
-          setPlayingId(null);
-        }
-      });
+
+      // 优先尝试客户端渲染（如果开启）
+      let videoUrl: string | null = null;
+      console.log('[ResultsScreen] 播放处理，客户端渲染状态:', clientRenderState.isEnabled ? '开启' : '关闭');
+      if (clientRenderState.isEnabled) {
+        videoUrl = await clientRenderPreview(item);
+      } else {
+        console.log('[ResultsScreen] 客户端渲染未开启，直接使用服务器渲染');
+      }
+
+      // 客户端渲染失败或未开启，降级到服务器渲染
+      if (!videoUrl) {
+        console.log('[ResultsScreen] 降级到服务器渲染...');
+        videoUrl = await triggerConcat(item);
+      }
+
+      if (videoUrl) {
+        // Video ready, update status (player will auto-load)
+        setResults(prev => prev.map(r =>
+          r.id === item.id ? { ...r, preview_status: 'completed', preview_url: videoUrl } : r
+        ));
+        // 后台缓存视频
+        const updatedItem = { ...item, preview_url: videoUrl, preview_status: 'completed' as const };
+        cacheVideo(updatedItem);
+      } else {
+        // Failed, show error
+        setResults(prev => prev.map(r =>
+          r.id === item.id ? { ...r, preview_status: 'failed' } : r
+        ));
+        setPlayingId(null);
+      }
     }
-  }, [playingId]);
+  }, [playingId, clientRenderState.isEnabled, clientRenderedVideos]);
 
   // Check if device is mobile
   const isMobile = () => {
@@ -278,11 +492,64 @@ export default function ResultsScreen({
     }, 5000);
   };
 
+  // 客户端导出视频
+  const clientExportVideo = async (item: ResultItem): Promise<Blob | null> => {
+    try {
+      // 检查是否已有客户端渲染结果
+      let existingBlob: Blob | undefined;
+      if (clientRenderedVideos.has(item.id)) {
+        const response = await fetch(clientRenderedVideos.get(item.id)!);
+        existingBlob = await response.blob();
+      }
+
+      // 加载本地素材文件
+      const files = await loadLocalMaterialFiles(item.materials);
+      if (files.length === 0) {
+        return null;
+      }
+
+      // 客户端导出
+      const result = await exportCombination(files, {
+        quality: defaultQuality === 'ultra' ? 'hd' : defaultQuality === 'low' ? 'preview' : 'hd',
+        existingBlob,
+        onProgress: (progress, stage) => {
+          console.log(`[ClientExport] 导出进度: ${progress}% - ${stage}`);
+        },
+      });
+
+      return result.blob;
+    } catch (error) {
+      console.error('[ClientExport] 客户端导出失败:', error);
+      return null;
+    }
+  };
+
   const handleDownload = useCallback(async (item: ResultItem, e: React.MouseEvent) => {
     e.stopPropagation();
-    
+
+    // 优先尝试客户端导出（如果开启）
+    if (clientRenderState.isEnabled) {
+      try {
+        const blob = await clientExportVideo(item);
+        if (blob) {
+          // 客户端导出成功，直接下载
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = `mixcut_${item.id}.mp4`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+          return;
+        }
+      } catch (error) {
+        console.warn('[ClientExport] 客户端导出失败，降级到服务器:', error);
+      }
+    }
+
     let videoUrl = item.preview_url;
-    
+
     // If video not ready, trigger concat first
     if (item.preview_status !== 'completed' || !videoUrl) {
       videoUrl = await triggerConcat(item);
@@ -291,7 +558,7 @@ export default function ResultsScreen({
         return;
       }
     }
-    
+
     // Now download the video
     try {
       const fullUrl = videoUrl.startsWith('http') ? videoUrl : `${API_BASE_URL}${videoUrl}`;
@@ -300,7 +567,7 @@ export default function ResultsScreen({
       console.error('下载失败:', error);
       alert('下载失败：' + (error instanceof Error ? error.message : '请重试'));
     }
-  }, [defaultQuality]);
+  }, [defaultQuality, clientRenderState.isEnabled, clientRenderedVideos]);
 
   const handleBatchDownload = useCallback(async () => {
     const selectedItems = results.filter(r => r.selected);
@@ -360,10 +627,49 @@ export default function ResultsScreen({
     }
     
     try {
+      let finalVideoUrl = videoUrl;
+      
+      // 如果是客户端渲染的Blob URL，需要先上传到OSS
+      if (videoUrl && videoUrl.startsWith('blob:')) {
+        console.log('[ResultsScreen] 检测到客户端渲染视频，开始上传到OSS...');
+        setKaipaiLoadingId(item.id);
+        
+        try {
+          // 从Blob URL获取Blob
+          const response = await fetch(videoUrl);
+          const blob = await response.blob();
+          
+          // 获取用户ID
+          const userId = 'anonymous'; // 可以从用户信息中获取
+          const filename = `client_render_${item.id}_${Date.now()}.mp4`;
+          
+          // 上传到OSS
+          const uploadResult = await uploadToOSSDirect(blob, filename, userId, (progress) => {
+            console.log(`[ResultsScreen] OSS上传进度: ${progress}%`);
+          });
+          
+          if (uploadResult.success) {
+            finalVideoUrl = uploadResult.url;
+            console.log('[ResultsScreen] OSS上传成功:', finalVideoUrl);
+          } else {
+            throw new Error('上传到OSS失败');
+          }
+        } catch (uploadError) {
+          console.error('[ResultsScreen] OSS上传失败:', uploadError);
+          alert('视频上传到OSS失败，请重试');
+          setKaipaiLoadingId(null);
+          return;
+        }
+        setKaipaiLoadingId(null);
+      }
+      
       // 创建 KaipaiEdit 任务
       const response = await fetch(`${API_BASE_URL}/api/renders/${item.id}/kaipai/edit`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          video_url: finalVideoUrl // 传入OSS URL（客户端渲染场景）
+        })
       });
       
       if (!response.ok) {
@@ -419,13 +725,65 @@ export default function ResultsScreen({
           </button>
           <h1 className="font-semibold text-gray-900 text-base">混剪结果</h1>
         </div>
-        <div className="text-xs text-gray-500 flex items-center gap-2">
-          <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
-            预览生成中 {previewProgress.completed}/{previewProgress.total}
-          </span>
+        <div className="flex items-center gap-2">
+          {/* 客户端渲染状态指示 */}
+          {clientRenderState.isEnabled && (
+            <span className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full">
+              <Cpu size={10} />
+              客户端渲染
+            </span>
+          )}
+          <button
+            onClick={() => setShowClientRenderPanel(!showClientRenderPanel)}
+            className={`p-1.5 rounded-full transition-colors ${clientRenderState.isEnabled ? 'text-green-600 bg-green-50' : 'text-gray-400 hover:text-gray-600'}`}
+            title="客户端渲染设置"
+          >
+            <Cpu size={16} />
+          </button>
+          <div className="text-xs text-gray-500 flex items-center gap-2">
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+              预览生成中 {previewProgress.completed}/{previewProgress.total}
+            </span>
+          </div>
         </div>
       </header>
+
+      {/* 客户端渲染面板 */}
+      {showClientRenderPanel && (
+        <div className="bg-white border-b border-gray-200 p-3 mx-2 mt-2 rounded-xl shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Cpu size={16} className={clientRenderState.isEnabled ? 'text-green-600' : 'text-gray-500'} />
+              <span className="font-medium text-sm text-gray-900">客户端渲染</span>
+              {clientRenderState.isEnabled && (
+                <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full">已启用</span>
+              )}
+            </div>
+          </div>
+          {clientRenderState.capability ? (
+            <div className="space-y-1 text-xs text-gray-600">
+              <div>性能等级: {clientRenderState.capability.performanceLevel}</div>
+              <div className="flex gap-1">
+                <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsFFmpeg ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  FFmpeg
+                </span>
+                <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsOPFS ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  OPFS
+                </span>
+                <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsWebCodecs ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  WebCodecs
+                </span>
+              </div>
+              <div className="text-[10px] text-gray-500">
+                客户端渲染的视频预览和导出将在浏览器本地完成，速度更快
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500">检测设备能力...</div>
+          )}
+        </div>
+      )}
 
       {/* Filters */}
       <div className="bg-white py-2 px-3 shrink-0 border-b border-gray-100">
@@ -476,13 +834,12 @@ export default function ResultsScreen({
                       // Playing state - show video player
                       <div className="absolute inset-0 bg-black">
                         {item.preview_url ? (
-                          // Video ready - play it
-                          <video
-                            src={item.preview_url.startsWith('http') ? item.preview_url : `${API_BASE_URL}${item.preview_url}`}
-                            className="w-full h-full object-contain"
-                            controls
-                            autoPlay
-                            playsInline
+                          // Video ready - play it (use optimized player with local cache)
+                          <OptimizedVideoPlayer
+                            itemId={item.id}
+                            videoUrl={item.preview_url}
+                            isCached={cachedVideos.has(item.id)}
+                            apiBaseUrl={API_BASE_URL}
                           />
                         ) : (
                           // Video loading - show spinner
@@ -624,3 +981,5 @@ export default function ResultsScreen({
     </div>
   );
 }
+
+

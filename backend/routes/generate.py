@@ -33,6 +33,10 @@ def clear_user_render_files(user_id):
 
 def is_material_ready(mat):
     """Check if a material is ready for video generation"""
+    # 本地素材：不需要检查文件存在性
+    if mat.unified_path == 'local' or getattr(mat, 'is_local', False):
+        return True, 'completed'
+    
     if mat.unified_path and os.path.exists(mat.unified_path):
         return True, 'completed'
     
@@ -170,15 +174,21 @@ def generate_combinations():
         material_lists = []
         shots_data = []
         for shot in shots:
-            mat_dicts = [{
-                'id': mat.id,
-                'type': mat.type,
-                'unified_path': mat.unified_path,
-                'thumbnail': f'/uploads/thumbnails/{os.path.basename(mat.thumbnail_path)}',
-                'duration': mat.duration,
-                'duration_seconds': mat.duration_seconds or (3.0 if mat.type == 'image' else 0),
-                'name': mat.original_name
-            } for mat in shot.materials if mat.unified_path and os.path.exists(mat.unified_path)]
+            mat_dicts = []
+            for mat in shot.materials:
+                # 本地素材：unified_path为'local'，不需要检查文件存在性
+                is_local = mat.unified_path == 'local' or getattr(mat, 'is_local', False)
+                if is_local or (mat.unified_path and os.path.exists(mat.unified_path)):
+                    mat_dicts.append({
+                        'id': mat.id,
+                        'type': mat.type,
+                        'unified_path': mat.unified_path,
+                        'thumbnail': f'/uploads/thumbnails/{os.path.basename(mat.thumbnail_path)}' if mat.thumbnail_path else '',
+                        'duration': mat.duration,
+                        'duration_seconds': mat.duration_seconds or (3.0 if mat.type == 'image' else 0),
+                        'name': mat.original_name,
+                        'is_local': is_local
+                    })
             if mat_dicts:
                 material_lists.append(mat_dicts)
                 shots_data.append({'name': shot.name, 'materials': len(mat_dicts)})

@@ -80,6 +80,13 @@ class Material(db.Model):
     duration = db.Column(db.String(10))
     duration_seconds = db.Column(db.Float, default=0)  # 数值类型，用于快速计算
     created_at = db.Column(db.DateTime, default=db.func.now())
+    
+    # 客户端渲染相关字段
+    is_local = db.Column(db.Boolean, default=False)  # 是否客户端本地渲染（视频文件在浏览器本地）
+    local_material_id = db.Column(db.String(36), nullable=True)  # 客户端本地素材ID（用于关联本地存储）
+    width = db.Column(db.Integer, nullable=True)  # 视频宽度
+    height = db.Column(db.Integer, nullable=True)  # 视频高度
+    file_size = db.Column(db.BigInteger, nullable=True)  # 文件大小（字节）
 
 
 class Render(db.Model):

@@ -3,7 +3,7 @@
  */
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
 
 export interface User {
   id: string;

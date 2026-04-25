@@ -57,7 +57,7 @@ from websocket import socketio, init_websocket
 from models import User, Shot, Material, Render, KaipaiEdit
 
 # Import blueprints
-from routes import ( 
+from routes import (
     auth_bp,
     users_bp,
     shots_bp,
@@ -66,7 +66,8 @@ from routes import (
     generate_bp,
     renders_bp,
     static_bp,
-    kaipai_bp
+    kaipai_bp,
+    oss_upload_bp
 )
 
 
@@ -139,6 +140,7 @@ def create_app():
     app.register_blueprint(generate_bp)
     app.register_blueprint(renders_bp)
     app.register_blueprint(static_bp)
+    app.register_blueprint(oss_upload_bp)
     
     # Debug: 打印所有路由
     print("Registered routes:")

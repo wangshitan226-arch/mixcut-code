@@ -13,8 +13,10 @@ import EditScreen from './components/EditScreen';
 import ResultsScreen from './components/ResultsScreen';
 import ProfileScreen from './components/ProfileScreen';
 import KaipaiEditor from './components/KaipaiEditor';
+import TestClientRendering from './components/TestClientRendering';
+import ASRComparisonTest from './components/ASRComparisonTest';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
 
 interface Material {
   id: string;
@@ -52,7 +54,7 @@ export default function App() {
 }
 
 function AppContent() {
-  const [mainTab, setMainTab] = useState<'home' | 'edit' | 'results' | 'profile'>('home');
+  const [mainTab, setMainTab] = useState<'home' | 'edit' | 'results' | 'profile' | 'test' | 'asr-test'>('home');
   const { user, isLoading: userLoading, setOnLogoutCallback } = useUser();
   const [shots, setShots] = useState<Shot[]>([]);
   const [combinations, setCombinations] = useState<Combination[]>([]);
@@ -310,6 +312,12 @@ function AppContent() {
         {mainTab === 'profile' && (
           <ProfileScreen onNavigate={(tab) => setMainTab(tab as any)} />
         )}
+        {mainTab === 'test' && (
+          <TestClientRendering />
+        )}
+        {mainTab === 'asr-test' && (
+          <ASRComparisonTest />
+        )}
       </div>
 
       {/* Kaipai Editor Modal */}
@@ -351,6 +359,24 @@ function AppContent() {
         >
           <User size={24} className={mainTab === 'profile' ? 'fill-blue-100' : ''} />
           <span className="text-[10px] font-medium">我的</span>
+        </button>
+        <button 
+          onClick={() => setMainTab('test')}
+          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'test' ? 'text-red-600' : 'text-gray-400'}`}
+        >
+          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${mainTab === 'test' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>
+            测
+          </div>
+          <span className="text-[10px] font-medium">测试</span>
+        </button>
+        <button 
+          onClick={() => setMainTab('asr-test')}
+          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'asr-test' ? 'text-purple-600' : 'text-gray-400'}`}
+        >
+          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${mainTab === 'asr-test' ? 'bg-purple-100 text-purple-600' : 'bg-gray-100 text-gray-500'}`}>
+            ASR
+          </div>
+          <span className="text-[10px] font-medium">ASR</span>
         </button>
       </div>
     </div>

@@ -148,6 +148,11 @@ def create_kaipai_edit(render_id):
         
         # 检查是否有OSS URL
         video_url = render.oss_url
+        
+        # 允许前端传入video_url（客户端渲染场景）
+        if not video_url:
+            video_url = data.get('video_url')
+        
         if not video_url:
             return jsonify({'error': '视频尚未上传到OSS，请稍后再试', 'code': 'NO_OSS_URL'}), 400
     
@@ -831,6 +836,56 @@ def get_preview_video(edit_id):
         'video_url': edit.original_video_url,
         'preview_mode': True
     })
+
+
+@kaipai_bp.route('/kaipai/<edit_id>/video', methods=['GET'])
+def download_kaipai_video(edit_id):
+    """
+    代理下载视频文件（解决CORS跨域问题）
+    
+    前端通过这个接口下载视频，避免直接从OSS下载时的CORS限制
+    """
+    edit = KaipaiEdit.query.get(edit_id)
+    if not edit:
+        return jsonify({'error': 'Edit not found'}), 404
+    
+    video_url = edit.original_video_url
+    if not video_url:
+        return jsonify({'error': 'Video URL not found'}), 404
+    
+    try:
+        import requests
+        from flask import Response
+        
+        logger.info(f"[Proxy] 开始代理下载视频: {edit_id}")
+        
+        # 从OSS下载视频
+        response = requests.get(video_url, stream=True, timeout=120)
+        response.raise_for_status()
+        
+        # 获取内容类型
+        content_type = response.headers.get('Content-Type', 'video/mp4')
+        
+        # 流式返回给前端
+        def generate():
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        
+        logger.info(f"[Proxy] 视频代理下载成功: {edit_id}")
+        
+        return Response(
+            generate(),
+            mimetype=content_type,
+            headers={
+                'Content-Disposition': f'inline; filename="{edit_id}.mp4"',
+                'Access-Control-Allow-Origin': '*',
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"[Proxy] 代理下载视频失败: {e}")
+        return jsonify({'error': f'下载视频失败: {str(e)}'}), 500
 
 
 @kaipai_bp.route('/kaipai/<edit_id>/preview/rendered', methods=['POST'])

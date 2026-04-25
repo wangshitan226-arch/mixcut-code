@@ -13,13 +13,16 @@ import {
   Download,
   LayoutTemplate,
   X,
+  Cpu,
 } from 'lucide-react';
 import SegmentItem from './SegmentItem';
 import EditModal from './EditModal';
-import VideoPlayer from './VideoPlayer';
+import UnifiedPlayer, { type UnifiedPlayerRef } from './UnifiedPlayer';
+import { saveVideo, getVideo } from '../../utils/videoStorage';
 import type { Segment } from './types';
+import { useClientRendering } from '../../hooks/useClientRendering';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
 
 // 模板类型定义
 interface Template {
@@ -69,16 +72,31 @@ export default function KaipaiEditor({
 
   // 原始视频URL（从草稿获取）
   const [originalVideoUrl, setOriginalVideoUrl] = useState<string>('');
-  
+
   // 预览视频URL（优先使用导出的视频，如果没有则使用原始视频）
   const [previewVideoUrl, setPreviewVideoUrl] = useState<string>('');
+
+  // 视频ID（用于本地缓存）
+  const [videoId, setVideoId] = useState<string>('');
 
   // 存储完整的ASR结果（包含被删除的片段）用于跳转判断
   const [allAsrSegments, setAllAsrSegments] = useState<Segment[]>([]);
   // 存储被删除的片段ID
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
+  // 是否已缓存到本地
+  const [isVideoCached, setIsVideoCached] = useState(false);
+  // 是否正在下载中（防止重复下载）
+  const isDownloadingRef = useRef(false);
+
+  // UnifiedPlayer ref 用于调用播放器方法
+  const unifiedPlayerRef = useRef<UnifiedPlayerRef>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // 客户端渲染状态
+  const { state: clientRenderState } = useClientRendering();
+  const [showClientRenderPanel, setShowClientRenderPanel] = useState(false);
+  const [clientExportBlob, setClientExportBlob] = useState<Blob | null>(null);
 
   // 获取草稿详情
   useEffect(() => {
@@ -106,6 +124,13 @@ export default function KaipaiEditor({
             setPreviewVideoUrl(draftData.original_video_url);
             console.log('[预览] 使用原始视频:', draftData.original_video_url);
           }
+
+          // 设置视频ID - 使用 editId 作为唯一标识
+          // 每个编辑草稿对应一个视频，editId 是唯一的
+          setVideoId(editId);
+
+          // 尝试缓存视频到本地（用于WebCodecs播放）
+          cacheVideoToLocal(editId, draftData.original_video_url);
         }
 
         // 加载ASR结果
@@ -181,6 +206,58 @@ export default function KaipaiEditor({
 
     loadDraft();
   }, [editId]);
+
+  // 缓存视频到本地存储
+  const cacheVideoToLocal = async (vid: string, videoUrl: string) => {
+    // 防止重复下载
+    if (isDownloadingRef.current) {
+      console.log('[缓存] 下载正在进行中，跳过重复请求');
+      return;
+    }
+
+    try {
+      // 检查是否已缓存
+      const { hasVideoInLocal } = await import('../../utils/videoStorage');
+      const hasLocal = await hasVideoInLocal(vid);
+
+      if (hasLocal) {
+        console.log('[缓存] 视频已在本地:', vid);
+        setIsVideoCached(true);
+        return;
+      }
+
+      // 标记开始下载
+      isDownloadingRef.current = true;
+
+      // 判断视频URL类型
+      const isOSSUrl = videoUrl.includes('aliyuncs.com') || videoUrl.includes('oss-');
+      
+      // 如果是OSS链接，使用后端代理接口避免CORS
+      const downloadUrl = isOSSUrl 
+        ? `${API_BASE_URL}/api/kaipai/${editId}/video`
+        : videoUrl;
+      
+      console.log('[缓存] 开始下载视频:', isOSSUrl ? '通过后端代理' : '直接下载');
+      const response = await fetch(downloadUrl);
+      if (!response.ok) {
+        throw new Error('下载视频失败');
+      }
+
+      const blob = await response.blob();
+      const file = new File([blob], `${vid}.mp4`, { type: 'video/mp4' });
+
+      // 保存到本地
+      await saveVideo(vid, file);
+      console.log('[缓存] 视频已缓存到本地:', vid, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
+      setIsVideoCached(true);
+    } catch (err) {
+      console.error('[缓存] 缓存视频失败:', err);
+      setIsVideoCached(false);
+    } finally {
+      // 标记下载结束
+      isDownloadingRef.current = false;
+    }
+  };
 
   // 启动语音识别
   const startTranscription = async () => {
@@ -316,16 +393,15 @@ export default function KaipaiEditor({
       );
 
       for (const range of removedRanges) {
+        // 检查当前时间是否在被删除范围内（包含边界）
         if (
           currentTimeMs >= range.beginTime &&
-          currentTimeMs < range.endTime
+          currentTimeMs <= range.endTime
         ) {
-          // 当前时间在被删除范围内，跳转到结束时间
-          return range.endTime;
-        }
-        if (currentTimeMs < range.beginTime) {
-          // 在当前时间之后有被删除的部分，但还没到，继续播放
-          break;
+          // 当前时间在被删除范围内，跳转到结束时间的下一秒
+          // 这样可以确保跳转到被删除片段之后的有效内容
+          console.log('[getNextValidTime] 时间', currentTimeMs, '在被删除范围内', range, '跳转到', range.endTime + 100);
+          return range.endTime + 100; // 加100ms确保跳过
         }
       }
 
@@ -356,7 +432,13 @@ export default function KaipaiEditor({
         nextValidTime !== null ? nextValidTime : targetTimeMs;
 
       console.log('[KaipaiEditor] Jumping to:', finalTime, 'isPlaying will be set to true');
-      // 只更新状态，实际的跳转和播放由 VideoPlayer 组件处理
+      
+      // 调用播放器的跳转方法
+      if (unifiedPlayerRef.current) {
+        unifiedPlayerRef.current.seekTo(finalTime);
+      }
+      
+      // 更新状态
       setCurrentTime(finalTime / 1000);
       setIsPlaying(true);
     },
@@ -629,7 +711,7 @@ export default function KaipaiEditor({
     }
   }, [editId, selectedTemplate]);
 
-  // 导出最终视频（使用新的export接口）
+  // 导出最终视频（调用服务器接口）
   const exportVideo = useCallback(async () => {
     if (segments.length === 0) {
       alert('没有可导出的内容');
@@ -639,6 +721,7 @@ export default function KaipaiEditor({
     setIsExporting(true);
     setExportProgress(0);
 
+    // 调用服务器渲染接口
     try {
       const response = await fetch(
         `${API_BASE_URL}/api/kaipai/${editId}/export`,
@@ -741,6 +824,20 @@ export default function KaipaiEditor({
         </button>
         <h1 className="font-semibold text-gray-900">网感剪辑</h1>
         <div className="flex items-center gap-2">
+          {/* 客户端渲染状态指示 */}
+          {clientRenderState.isEnabled && (
+            <span className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full">
+              <Cpu size={10} />
+              客户端
+            </span>
+          )}
+          <button
+            onClick={() => setShowClientRenderPanel(!showClientRenderPanel)}
+            className={`p-1.5 rounded-full transition-colors ${clientRenderState.isEnabled ? 'text-green-600 bg-green-50' : 'text-gray-400 hover:text-gray-600'}`}
+            title="客户端渲染设置"
+          >
+            <Cpu size={16} />
+          </button>
           {historyCount > 0 && (
             <button
               onClick={handleUndo}
@@ -759,23 +856,63 @@ export default function KaipaiEditor({
         </div>
       </header>
 
+      {/* 客户端渲染面板 */}
+      {showClientRenderPanel && (
+        <div className="bg-white border-b border-gray-200 p-3 mx-2 mt-2 rounded-xl shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Cpu size={16} className={clientRenderState.isEnabled ? 'text-green-600' : 'text-gray-500'} />
+              <span className="font-medium text-sm text-gray-900">客户端渲染</span>
+              {clientRenderState.isEnabled && (
+                <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full">已启用</span>
+              )}
+            </div>
+          </div>
+          {clientRenderState.capability ? (
+            <div className="space-y-1 text-xs text-gray-600">
+              <div>性能等级: {clientRenderState.capability.performanceLevel}</div>
+              <div className="flex gap-1">
+                <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsFFmpeg ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  FFmpeg
+                </span>
+                <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsOPFS ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  OPFS
+                </span>
+                <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsWebCodecs ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  WebCodecs
+                </span>
+              </div>
+              <div className="text-[10px] text-gray-500">
+                客户端导出将在浏览器本地完成视频裁剪，速度更快
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500">检测设备能力...</div>
+          )}
+        </div>
+      )}
+
       {/* 主内容区 - 视频预览 */}
       <div className="flex-1 flex flex-col min-h-0">
-        <VideoPlayer
-          videoUrl={previewVideoUrl}
-          currentTime={currentTime}
-          isPlaying={isPlaying}
-          subtitle={currentSubtitle}
-          progressPercent={progressPercent}
-          totalDuration={totalDuration}
-          allAsrSegments={allAsrSegments}
-          removedIds={removedIds}
-          onTogglePlay={togglePlay}
-          onTimeUpdate={handleTimeUpdate}
-          onEnded={handleVideoEnded}
-          onSeek={jumpToTime}
-          onSubtitleChange={handleSubtitleChange}
-        />
+        {videoId && previewVideoUrl ? (
+          <UnifiedPlayer
+            ref={unifiedPlayerRef}
+            videoId={videoId}
+            videoUrl={previewVideoUrl}
+            segments={allAsrSegments}
+            removedIds={removedIds}
+            onTimeUpdate={handleTimeUpdate}
+            onSegmentChange={handleSubtitleChange}
+            onEnded={handleVideoEnded}
+          />
+        ) : (
+          <div className="flex items-center justify-center h-full bg-gray-900 text-white">
+            <div className="text-center">
+              <Loader2 size={32} className="animate-spin mx-auto mb-2" />
+              <p className="text-sm text-gray-400">加载视频...</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 操作栏 */}
@@ -897,9 +1034,9 @@ export default function KaipaiEditor({
 
                 {/* Segments */}
                 <div className="flex-1 overflow-y-auto px-4 py-4 scrollbar-hide pb-28">
-                  {segments.map((segment) => (
+                  {segments.map((segment, index) => (
                     <SegmentItem
-                      key={segment.id}
+                      key={index}
                       segment={segment}
                       isSelected={!!segment.selected}
                       onToggle={toggleSelect}

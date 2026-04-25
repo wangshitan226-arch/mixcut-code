@@ -10,9 +10,10 @@ from .generate import generate_bp
 from .renders import renders_bp
 from .static import static_bp
 from .kaipai import kaipai_bp
+from .oss_upload import oss_upload_bp
 
 __all__ = [
     'auth_bp', 'users_bp', 'shots_bp', 'materials_bp',
     'upload_bp', 'generate_bp', 'renders_bp', 'static_bp',
-    'kaipai_bp'
+    'kaipai_bp', 'oss_upload_bp'
 ]

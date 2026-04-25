@@ -1,8 +1,12 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { ChevronLeft, Mic, Trash2, Plus, Film, Image as ImageIcon, Loader2 } from 'lucide-react';
+import { ChevronLeft, Mic, Trash2, Plus, Film, Image as ImageIcon, Loader2, Cpu } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
+import { useClientRendering } from '../hooks/useClientRendering';
+import { processMaterial, ProcessedMaterial } from '../utils/clientMaterialProcessor';
+import { isOPFSSupported } from '../utils/opfs';
+import { isIndexedDBSupported } from '../utils/indexedDB';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
 const WS_BASE_URL = API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
 const POLLING_INTERVAL = 200; // 200ms轮询间隔，作为WebSocket的fallback
 
@@ -45,13 +49,13 @@ const QUALITY_OPTIONS = [
   { value: 'ultra', label: '原画', desc: '4K' }
 ];
 
-export default function EditScreen({ 
-  userId, 
-  shots, 
-  onBack, 
-  onSynthesize, 
-  onAddShot, 
-  onDeleteShot, 
+export default function EditScreen({
+  userId,
+  shots,
+  onBack,
+  onSynthesize,
+  onAddShot,
+  onDeleteShot,
   onDeleteMaterial,
   onRefresh,
   isLoading,
@@ -62,6 +66,11 @@ export default function EditScreen({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeShotId, setActiveShotId] = useState<number | null>(null);
   const [transcodingMaterials, setTranscodingMaterials] = useState<Set<string>>(new Set());
+
+  // 客户端渲染状态
+  const { state: clientRenderState, enable: enableClientRender, disable: disableClientRender, forceEnable: forceEnableClientRender } = useClientRendering();
+  const [clientProcessedMaterials, setClientProcessedMaterials] = useState<Map<string, ProcessedMaterial>>(new Map());
+  const [showClientRenderPanel, setShowClientRenderPanel] = useState(false);
   
   // WebSocket连接
   const socketRef = useRef<Socket | null>(null);
@@ -256,35 +265,109 @@ export default function EditScreen({
     fileInputRef.current?.click();
   };
 
-  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (!files || files.length === 0 || activeShotId === null) return;
+  // 客户端渲染模式：本地处理素材并上传元数据
+  const handleClientSideUpload = async (file: File, shotId: number) => {
+    setUploading({ shotId, progress: 0 });
+    console.log('[EditScreen] ====== 开始客户端渲染上传 ======');
+    console.log('[EditScreen] 文件名:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
+    console.log('[EditScreen] 客户端渲染状态:', clientRenderState.isEnabled ? '已开启' : '已关闭');
 
-    const file = files[0];
-    const isVideo = file.type.startsWith('video/');
-    const isImage = file.type.startsWith('image/');
+    try {
+      // 1. 本地转码处理
+      console.log('[EditScreen] 步骤1/3: 本地FFmpeg转码...');
 
-    if (!isVideo && !isImage) {
-      alert('请上传视频或图片文件');
-      return;
+      // 生成素材ID（确保前后端一致）
+      const materialId = `mat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      console.log('[EditScreen] 生成素材ID:', materialId);
+
+      const processed = await processMaterial(file, {
+        quality: clientRenderState.capability?.recommendedQuality || 'medium',
+        generateThumbnail: true,
+        materialId,  // 传入自定义ID，确保前后端一致
+        onProgress: (progress, stage) => {
+          // 转码阶段占 0-80%
+          setUploading({ shotId, progress: Math.round(progress * 0.8) });
+        },
+      });
+      console.log('[EditScreen] 本地转码完成:', processed.id, '时长:', processed.duration, '大小:', (processed.size / 1024 / 1024).toFixed(2), 'MB');
+
+      // 保存到本地素材映射
+      setClientProcessedMaterials(prev => new Map(prev).set(processed.id, processed));
+
+      // 2. 上传元数据到服务器（视频保留在本地）
+      console.log('[EditScreen] 步骤2/3: 上传元数据到服务器...');
+      setUploading({ shotId, progress: 85 });
+
+      const formData = new FormData();
+      formData.append('user_id', userId);
+      formData.append('shot_id', shotId.toString());
+      formData.append('material_id', processed.id);
+      formData.append('duration', processed.duration.toString());
+      formData.append('width', processed.width.toString());
+      formData.append('height', processed.height.toString());
+      formData.append('file_size', processed.size.toString());
+      formData.append('is_local', 'true');
+
+      // 上传缩略图
+      if (processed.thumbnailBlob) {
+        formData.append('thumbnail', processed.thumbnailBlob, 'thumbnail.jpg');
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/materials/metadata`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        // 如果元数据接口不存在，降级到原有上传接口
+        console.warn('[EditScreen] 元数据接口不可用(状态码:' + response.status + ')，降级到服务器上传');
+        await handleServerSideUpload(file, shotId);
+        return;
+      }
+
+      const result = await response.json();
+      console.log('[EditScreen] 元数据上传完成:', result);
+      console.log('[EditScreen] ====== 客户端渲染上传成功 ======');
+
+      setUploading({ shotId, progress: 100 });
+
+      // 刷新镜头数据
+      onRefresh();
+
+    } catch (error) {
+      console.error('[EditScreen] 客户端处理失败:', error);
+      // 降级到服务器上传
+      alert('客户端处理失败，尝试服务器上传...');
+      await handleServerSideUpload(file, shotId);
+    } finally {
+      setUploading({ shotId: null, progress: 0 });
+      setActiveShotId(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
+  };
 
-    setUploading({ shotId: activeShotId, progress: 0 });
+  // 服务器渲染模式：原有上传逻辑
+  const handleServerSideUpload = async (file: File, shotId: number) => {
+    setUploading({ shotId, progress: 0 });
+    console.log('[EditScreen] ====== 开始服务器上传 ======');
+    console.log('[EditScreen] 文件名:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
 
     try {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('user_id', userId);
-      formData.append('shotId', activeShotId.toString());
+      formData.append('shotId', shotId.toString());
       formData.append('quality', selectedQuality);
 
       const xhr = new XMLHttpRequest();
-      
+
       const uploadPromise = new Promise<any>((resolve, reject) => {
         xhr.upload.addEventListener('progress', (e) => {
           if (e.lengthComputable) {
             const progress = Math.round((e.loaded / e.total) * 100);
-            setUploading({ shotId: activeShotId, progress });
+            setUploading({ shotId, progress });
           }
         });
 
@@ -304,17 +387,18 @@ export default function EditScreen({
       });
 
       const result = await uploadPromise;
-      console.log('[Upload] Upload completed, result:', result);
-      
+      console.log('[EditScreen] 服务器上传完成:', result);
+      console.log('[EditScreen] ====== 服务器上传成功 ======');
+
       // 立即将新素材加入转码跟踪（如果有转码任务）
       if (result.transcode_task_id) {
         console.log('[Upload] Adding material to transcoding tracking:', result.id);
         setTranscodingMaterials(prev => new Set(prev).add(result.id));
       }
-      
+
       // Refresh shots data from backend
       onRefresh();
-      
+
       // 立即开始检查转码状态（不等待轮询）
       if (result.transcode_task_id) {
         console.log('[Upload] Starting immediate transcode status check');
@@ -333,6 +417,33 @@ export default function EditScreen({
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
+    }
+  };
+
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0 || activeShotId === null) return;
+
+    const file = files[0];
+    const isVideo = file.type.startsWith('video/');
+    const isImage = file.type.startsWith('image/');
+
+    if (!isVideo && !isImage) {
+      alert('请上传视频或图片文件');
+      return;
+    }
+
+    // 图片文件仍然走服务器上传
+    if (isImage) {
+      await handleServerSideUpload(file, activeShotId);
+      return;
+    }
+
+    // 视频文件根据客户端渲染开关选择路径
+    if (clientRenderState.isEnabled && isVideo) {
+      await handleClientSideUpload(file, activeShotId);
+    } else {
+      await handleServerSideUpload(file, activeShotId);
     }
   };
 
@@ -364,9 +475,98 @@ export default function EditScreen({
         <button onClick={onBack} className="p-2 -ml-2 text-gray-700 active:bg-gray-100 rounded-full transition-colors">
           <ChevronLeft size={24} />
         </button>
-        <h1 className="font-semibold text-gray-900 text-base">智能混剪</h1>
-        <div className="w-8"></div>
+        <div className="flex items-center gap-2">
+          <h1 className="font-semibold text-gray-900 text-base">智能混剪</h1>
+          {/* 客户端渲染状态指示器 */}
+          {clientRenderState.isLoading ? (
+            <span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 text-[10px] rounded-full animate-pulse">
+              检测中...
+            </span>
+          ) : clientRenderState.isEnabled ? (
+            <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full">
+              本地渲染
+            </span>
+          ) : (
+            <span className="px-2 py-0.5 bg-gray-100 text-gray-600 text-[10px] rounded-full">
+              服务器渲染
+            </span>
+          )}
+        </div>
+        {/* 客户端渲染开关 */}
+        <button
+          onClick={() => setShowClientRenderPanel(!showClientRenderPanel)}
+          className={`p-2 rounded-full transition-colors ${clientRenderState.isEnabled ? 'text-green-600 bg-green-50' : 'text-gray-400 hover:text-gray-600'}`}
+          title="客户端渲染设置"
+        >
+          <Cpu size={20} />
+        </button>
       </header>
+
+      {/* 客户端渲染面板 */}
+      {showClientRenderPanel && (
+        <div className="bg-white border-b border-gray-200 p-4 mx-3 mt-2 rounded-xl shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Cpu size={18} className={clientRenderState.isEnabled ? 'text-green-600' : 'text-gray-500'} />
+              <span className="font-medium text-sm text-gray-900">客户端渲染</span>
+              {clientRenderState.isEnabled && (
+                <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full">已启用</span>
+              )}
+            </div>
+            {clientRenderState.capability?.canUseClientRendering && (
+              <button
+                onClick={clientRenderState.isEnabled ? disableClientRender : enableClientRender}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                  clientRenderState.isEnabled ? 'bg-green-600' : 'bg-gray-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                    clientRenderState.isEnabled ? 'translate-x-5' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            )}
+          </div>
+
+          {clientRenderState.isLoading ? (
+            <div className="text-xs text-gray-500">检测设备能力...</div>
+          ) : clientRenderState.capability ? (
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
+                <div>性能等级: {clientRenderState.capability.performanceLevel}</div>
+                <div>内存: {clientRenderState.capability.memoryGB}GB</div>
+              </div>
+              {!clientRenderState.capability.canUseClientRendering && (
+                <div className="text-xs text-red-600 bg-red-50 p-2 rounded">
+                  当前设备不支持客户端渲染
+                  {clientRenderState.capability.isMobile && (
+                    <button
+                      onClick={forceEnableClientRender}
+                      className="ml-2 px-2 py-0.5 bg-orange-600 text-white rounded text-[10px]"
+                    >
+                      强制启用
+                    </button>
+                  )}
+                </div>
+              )}
+              <div className="flex gap-2 text-[10px]">
+                <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsFFmpeg ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  FFmpeg
+                </span>
+                <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsOPFS ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  OPFS
+                </span>
+                <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsWebCodecs ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  WebCodecs
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-red-500">设备检测失败</div>
+          )}
+        </div>
+      )}
 
       {/* Scrollable Config Content */}
       <div className="flex-1 overflow-y-auto p-3 pb-28 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] space-y-3">

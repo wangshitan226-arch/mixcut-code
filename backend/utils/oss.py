@@ -13,19 +13,19 @@ logger = logging.getLogger(__name__)
 
 class OSSClient:
     """阿里云OSS客户端"""
-    
+
     def __init__(self):
         # 从环境变量读取配置（生产环境推荐）
         # 或从config.py读取（开发环境）
         try:
             from config import OSS_CONFIG
-            
+
             self.access_key_id = OSS_CONFIG.get('access_key_id', '')
             self.access_key_secret = OSS_CONFIG.get('access_key_secret', '')
             self.endpoint = OSS_CONFIG.get('endpoint', '')
             self.bucket_name = OSS_CONFIG.get('bucket_name', '')
             self.cdn_domain = OSS_CONFIG.get('cdn_domain', '')  # 可选CDN加速域名
-            
+
             if not all([self.access_key_id, self.access_key_secret, self.endpoint, self.bucket_name]):
                 logger.warning("OSS配置不完整，将使用本地存储模式")
                 self.enabled = False
@@ -34,6 +34,12 @@ class OSSClient:
                 self.auth = oss2.Auth(self.access_key_id, self.access_key_secret)
                 self.bucket = oss2.Bucket(self.auth, self.endpoint, self.bucket_name)
                 logger.info(f"OSS客户端初始化成功: {self.bucket_name}")
+
+                # 初始化杭州bucket（用于ICE转码）
+                self.hangzhou_bucket_name = 'mixcut'
+                self.hangzhou_endpoint = 'oss-cn-hangzhou.aliyuncs.com'
+                self.hangzhou_bucket = oss2.Bucket(self.auth, self.hangzhou_endpoint, self.hangzhou_bucket_name)
+                logger.info(f"杭州OSS客户端初始化成功: {self.hangzhou_bucket_name}")
         except Exception as e:
             logger.error(f"OSS客户端初始化失败: {e}")
             self.enabled = False
@@ -253,6 +259,49 @@ class OSSClient:
             return exists
         except Exception as e:
             logger.error(f"检查OSS文件存在性失败: {e}")
+            return False
+    
+    def copy_object(self, source_bucket: str, source_key: str, dest_bucket: str, dest_key: str) -> bool:
+        """
+        跨bucket复制OSS对象
+        
+        Args:
+            source_bucket: 源bucket名称
+            source_key: 源文件路径
+            dest_bucket: 目标bucket名称
+            dest_key: 目标文件路径
+            
+        Returns:
+            bool: 是否复制成功
+        """
+        if not self.enabled:
+            logger.warning("OSS未启用，跳过复制")
+            return False
+        
+        try:
+            # 根据bucket名称确定endpoint
+            # mixcut bucket 在杭州地域
+            if dest_bucket == 'mixcut':
+                dest_endpoint = 'oss-cn-hangzhou.aliyuncs.com'
+            else:
+                dest_endpoint = self.endpoint
+            
+            # 创建目标bucket连接（使用正确的endpoint）
+            if dest_bucket != self.bucket_name or dest_endpoint != self.endpoint:
+                dest_bucket_obj = oss2.Bucket(self.auth, dest_endpoint, dest_bucket)
+            else:
+                dest_bucket_obj = self.bucket
+            
+            # 执行复制
+            logger.info(f"[OSS] 复制文件: {source_bucket}/{source_key} -> {dest_bucket}/{dest_key}")
+            dest_bucket_obj.copy_object(source_bucket, source_key, dest_key)
+            logger.info(f"[OSS] 复制成功: {dest_bucket}/{dest_key}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[OSS] 复制文件失败: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def refresh_cdn_cache(self, oss_url: str) -> bool:

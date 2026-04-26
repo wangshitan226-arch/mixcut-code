@@ -44,6 +44,7 @@ interface ResultItem {
   materials: Material[];
   preview_status: 'pending' | 'processing' | 'completed' | 'failed';
   preview_url?: string;
+  server_video_url?: string; // 视频①：服务器高质量拼接视频URL
 }
 
 const FILTERS = ['全部', '完全不重复', '极低重复率', '普通'];
@@ -68,7 +69,8 @@ export default function ResultsScreen({
   // Kaipai Editor state
   const [showKaipaiEditor, setShowKaipaiEditor] = useState(false);
   const [kaipaiEditId, setKaipaiEditId] = useState<string>('');
-  const [kaipaiVideoUrl, setKaipaiVideoUrl] = useState<string>('');
+  const [kaipaiVideoUrl, setKaipaiVideoUrl] = useState<string>(''); // 视频①：服务器高质量视频URL
+  const [kaipaiClientVideoUrl, setKaipaiClientVideoUrl] = useState<string>(''); // 视频②：客户端预览视频URL
   const [kaipaiLoadingId, setKaipaiLoadingId] = useState<string | null>(null);
 
   // 本地缓存状态
@@ -78,6 +80,18 @@ export default function ResultsScreen({
   // 客户端渲染状态
   const { state: clientRenderState } = useClientRendering();
   const [clientRenderedVideos, setClientRenderedVideos] = useState<Map<string, string>>(new Map());
+  // 使用 ref 获取最新的 clientRenderedVideos，避免闭包问题
+  const clientRenderedVideosRef = useRef(clientRenderedVideos);
+  useEffect(() => {
+    clientRenderedVideosRef.current = clientRenderedVideos;
+  }, [clientRenderedVideos]);
+  
+  // 已上传到OSS的URL缓存（避免重复上传）
+  const [ossUploadedUrls, setOssUploadedUrls] = useState<Map<string, string>>(new Map());
+  const ossUploadedUrlsRef = useRef(ossUploadedUrls);
+  useEffect(() => {
+    ossUploadedUrlsRef.current = ossUploadedUrls;
+  }, [ossUploadedUrls]);
   const [showClientRenderPanel, setShowClientRenderPanel] = useState(false);
 
   // Initialize results from props
@@ -325,10 +339,11 @@ export default function ResultsScreen({
       console.log('[ResultsScreen] ====== 尝试客户端渲染预览 ======');
       console.log('[ResultsScreen] 组合ID:', item.id, '素材数:', item.materials.length);
 
-      // 检查是否已有客户端渲染结果
-      if (clientRenderedVideos.has(item.id)) {
-        console.log('[ResultsScreen] 使用缓存的客户端渲染结果');
-        return clientRenderedVideos.get(item.id) || null;
+      // 检查是否已有客户端渲染结果（使用 ref 获取最新值，避免闭包问题）
+      const cachedUrl = clientRenderedVideosRef.current.get(item.id);
+      if (cachedUrl) {
+        console.log('[ResultsScreen] 使用缓存的客户端渲染结果:', cachedUrl);
+        return cachedUrl;
       }
 
       // 加载本地素材文件
@@ -363,6 +378,48 @@ export default function ResultsScreen({
     }
   };
 
+  // 启动服务器FFmpeg高质量拼接并上传OSS（视频①）
+  const startServerFFmpegRender = useCallback(async (item: ResultItem) => {
+    console.log(`[双轨制] ========== 服务器FFmpeg拼接+OSS上传开始 ==========`);
+    console.log(`[双轨制] 组合ID: ${item.id}`);
+    console.log(`[双轨制] 当前状态: server_video_url=${item.server_video_url || '无'}`);
+    
+    try {
+      console.log(`[双轨制] 调用接口: POST /api/combinations/${item.id}/server-render`);
+      
+      const response = await fetch(`${API_BASE_URL}/api/combinations/${item.id}/server-render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      console.log(`[双轨制] 后端响应状态码: ${response.status}`);
+      
+      const data = await response.json();
+      console.log('[双轨制] 后端响应数据:', JSON.stringify(data, null, 2));
+      
+      if (data.status === 'completed') {
+        console.log(`[双轨制] ✅ 服务器FFmpeg拼接+OSS上传完成`);
+        console.log(`[双轨制] 📹 视频①OSS URL: ${data.video_url}`);
+        
+        // 视频①已上传OSS
+        setResults(prev => prev.map(r =>
+          r.id === item.id ? { ...r, server_video_url: data.video_url } : r
+        ));
+      } else if (data.status === 'processing' || data.status === 'local_ready') {
+        console.log(`[双轨制] ⏳ 服务器FFmpeg拼接+OSS上传中...`);
+      } else if (data.error) {
+        console.error(`[双轨制] ❌ 服务器FFmpeg拼接+OSS上传失败: ${data.error}`);
+      }
+      
+      return data;
+    } catch (error) {
+      console.error('[双轨制] ❌ 启动服务器FFmpeg拼接+OSS上传异常:', error);
+      return null;
+    } finally {
+      console.log(`[双轨制] ========== 服务器FFmpeg拼接+OSS上传结束 ==========`);
+    }
+  }, []);
+
   const handlePlay = useCallback(async (item: ResultItem) => {
     // If already playing, stop
     if (playingId === item.id) {
@@ -375,6 +432,10 @@ export default function ResultsScreen({
       setPlayingId(item.id);
       // 后台缓存视频
       cacheVideo(item);
+      // 同时确保服务器FFmpeg高质量视频+OSS也在生成中（如果还没有）
+      if (!item.server_video_url) {
+        startServerFFmpegRender(item);
+      }
       return;
     }
 
@@ -386,20 +447,39 @@ export default function ResultsScreen({
       ));
       setPlayingId(item.id);
 
-      // 优先尝试客户端渲染（如果开启）
+      // ========== 双轨并行：同时启动浏览器WebCodecs拼接（视频②）和本地FFmpeg拼接（视频①） ==========
+      console.log(`[双轨制] ========== 点击预览，双轨并行开始 ==========`);
+      console.log(`[双轨制] 组合ID: ${item.id}`);
+      console.log(`[双轨制] 素材列表: ${item.materials.map(m => m.id).join(', ')}`);
+      
+      // 1. 启动服务器FFmpeg高质量拼接+OSS上传（视频①）- 异步，不阻塞预览
+      console.log(`[双轨制] 🎬 轨道①: 启动服务器FFmpeg拼接+OSS上传（异步）`);
+      startServerFFmpegRender(item);
+
+      // 2. 浏览器WebCodecs快速拼接（视频②）- 用于立即预览
+      console.log(`[双轨制] 🌐 轨道②: 启动浏览器WebCodecs拼接`);
       let videoUrl: string | null = null;
-      console.log('[ResultsScreen] 播放处理，客户端渲染状态:', clientRenderState.isEnabled ? '开启' : '关闭');
+      console.log(`[双轨制] 浏览器WebCodecs状态: ${clientRenderState.isEnabled ? '✅ 开启' : '❌ 关闭'}`);
+      
       if (clientRenderState.isEnabled) {
+        console.log(`[双轨制] 调用 clientRenderPreview...`);
         videoUrl = await clientRenderPreview(item);
+        console.log(`[双轨制] clientRenderPreview 返回: ${videoUrl ? '✅ 成功' : '❌ 失败'}`);
+        if (videoUrl) {
+          console.log(`[双轨制] 📹 视频② Blob URL: ${videoUrl.substring(0, 50)}...`);
+        }
       } else {
-        console.log('[ResultsScreen] 客户端渲染未开启，直接使用服务器渲染');
+        console.log('[双轨制] 浏览器WebCodecs未开启，跳过轨道②');
       }
 
-      // 客户端渲染失败或未开启，降级到服务器渲染
+      // 浏览器WebCodecs拼接失败或未开启，降级到本地FFmpeg拼接
       if (!videoUrl) {
-        console.log('[ResultsScreen] 降级到服务器渲染...');
+        console.log('[双轨制] ⚠️ 轨道②失败，降级到本地FFmpeg拼接...');
         videoUrl = await triggerConcat(item);
+        console.log(`[双轨制] 本地FFmpeg降级拼接: ${videoUrl ? '✅ 成功' : '❌ 失败'}`);
       }
+      
+      console.log(`[双轨制] ========== 双轨并行结束 ==========`);
 
       if (videoUrl) {
         // Video ready, update status (player will auto-load)
@@ -417,7 +497,7 @@ export default function ResultsScreen({
         setPlayingId(null);
       }
     }
-  }, [playingId, clientRenderState.isEnabled, clientRenderedVideos]);
+  }, [playingId, clientRenderState.isEnabled, clientRenderedVideos, startServerFFmpegRender]);
 
   // Check if device is mobile
   const isMobile = () => {
@@ -495,10 +575,11 @@ export default function ResultsScreen({
   // 客户端导出视频
   const clientExportVideo = async (item: ResultItem): Promise<Blob | null> => {
     try {
-      // 检查是否已有客户端渲染结果
+      // 检查是否已有客户端渲染结果（使用 ref 获取最新值）
       let existingBlob: Blob | undefined;
-      if (clientRenderedVideos.has(item.id)) {
-        const response = await fetch(clientRenderedVideos.get(item.id)!);
+      const cachedUrl = clientRenderedVideosRef.current.get(item.id);
+      if (cachedUrl) {
+        const response = await fetch(cachedUrl);
         existingBlob = await response.blob();
       }
 
@@ -600,7 +681,7 @@ export default function ResultsScreen({
     }
   }, [results]);
 
-  // 打开网感剪辑（使用选中的视频）
+  // 打开网感剪辑（使用选中的视频）- 双轨制版本
   const handleOpenKaipai = useCallback(async () => {
     const selectedItems = results.filter(r => r.selected);
     if (selectedItems.length === 0) {
@@ -614,61 +695,143 @@ export default function ResultsScreen({
     
     const item = selectedItems[0];
     
-    // 确保视频已合成
-    let videoUrl = item.preview_url;
-    if (item.preview_status !== 'completed' || !videoUrl) {
+    console.log(`[双轨制] ========== 点击文字快剪，开始准备视频 ==========`);
+    console.log(`[双轨制] 组合ID: ${item.id}`);
+    console.log(`[双轨制] 当前状态: server_video_url=${item.server_video_url || '无'}, preview_url=${item.preview_url || '无'}`);
+    
+    // ========== 双轨制：确保视频①（服务器FFmpeg高质量+OSS）已准备好 ==========
+    let serverVideoUrl = item.server_video_url || item.oss_url;
+    console.log(`[双轨制] 🎬 轨道①检查: server_video_url=${serverVideoUrl ? '✅ 存在' : '❌ 不存在'}`);
+    
+    // 如果视频①不存在，触发服务器FFmpeg拼接并上传OSS
+    if (!serverVideoUrl) {
+      console.log('[双轨制] 轨道①不存在，启动服务器FFmpeg拼接+OSS上传...');
       setKaipaiLoadingId(item.id);
-      videoUrl = await triggerConcat(item);
-      setKaipaiLoadingId(null);
-      if (!videoUrl) {
-        alert('视频合成失败，请重试');
-        return;
+      
+      // 调用 server-render 接口：FFmpeg拼接 + OSS上传
+      console.log(`[双轨制] 调用接口: POST /api/combinations/${item.id}/server-render`);
+      const serverResponse = await fetch(
+        `${API_BASE_URL}/api/combinations/${item.id}/server-render`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+      );
+      
+      console.log(`[双轨制] 后端响应状态码: ${serverResponse.status}`);
+      
+      const serverData = await serverResponse.json();
+      console.log('[双轨制] 后端响应:', JSON.stringify(serverData, null, 2));
+      
+      if (serverData.status === 'completed') {
+        serverVideoUrl = serverData.video_url;  // 这是OSS URL
+        console.log(`[双轨制] ✅ 轨道①完成(OSS): ${serverVideoUrl}`);
+        // 更新本地状态
+        setResults(prev => prev.map(r =>
+          r.id === item.id ? { ...r, server_video_url: serverData.video_url } : r
+        ));
+      } else if (serverData.status === 'processing' || serverData.status === 'local_ready') {
+        console.log(`[双轨制] ⏳ 轨道①上传中...`);
+        // 轮询 server-render/status 接口
+        await new Promise<void>((resolve) => {
+          const checkInterval = setInterval(async () => {
+            try {
+              const statusResponse = await fetch(
+                `${API_BASE_URL}/api/combinations/${item.id}/server-render/status`
+              );
+              const statusData = await statusResponse.json();
+              console.log(`[双轨制] 轨道①状态: ${statusData.status}, 进度: ${statusData.progress}%`);
+              
+              if (statusData.status === 'completed') {
+                clearInterval(checkInterval);
+                serverVideoUrl = statusData.video_url;  // OSS URL
+                console.log(`[双轨制] ✅ 轨道①完成(OSS): ${serverVideoUrl}`);
+                setResults(prev => prev.map(r =>
+                  r.id === item.id ? { ...r, server_video_url: statusData.video_url } : r
+                ));
+                resolve();
+              } else if (statusData.status === 'failed') {
+                clearInterval(checkInterval);
+                console.error(`[双轨制] ❌ 轨道①失败: ${statusData.error}`);
+                resolve();
+              }
+            } catch (e) {
+              console.error('[双轨制] 轮询轨道①失败:', e);
+            }
+          }, 2000);
+        });
+      } else if (serverData.error) {
+        console.error(`[双轨制] ❌ 轨道①失败: ${serverData.error}`);
       }
+      
+      setKaipaiLoadingId(null);
+    } else {
+      console.log(`[双轨制] ✅ 轨道①已存在(OSS): ${serverVideoUrl}`);
     }
     
-    try {
-      let finalVideoUrl = videoUrl;
+    if (!serverVideoUrl) {
+      alert('本地FFmpeg视频准备失败，请重试');
+      return;
+    }
+    
+    // ========== 视频②（浏览器WebCodecs预览视频）准备 ==========
+    console.log(`[双轨制] 🌐 轨道②检查: preview_url=${item.preview_url ? '✅ 存在' : '❌ 不存在'}`);
+    let clientVideoUrl = item.preview_url;
+    
+    // 如果浏览器视频②不存在，尝试用WebCodecs生成
+    if (!clientVideoUrl || item.preview_status !== 'completed') {
+      console.log('[双轨制] 轨道②不存在，尝试浏览器WebCodecs渲染...');
+      setKaipaiLoadingId(item.id);
       
-      // 如果是客户端渲染的Blob URL，需要先上传到OSS
-      if (videoUrl && videoUrl.startsWith('blob:')) {
-        console.log('[ResultsScreen] 检测到客户端渲染视频，开始上传到OSS...');
-        setKaipaiLoadingId(item.id);
-        
-        try {
-          // 从Blob URL获取Blob
-          const response = await fetch(videoUrl);
-          const blob = await response.blob();
-          
-          // 获取用户ID
-          const userId = 'anonymous'; // 可以从用户信息中获取
-          const filename = `client_render_${item.id}_${Date.now()}.mp4`;
-          
-          // 上传到OSS
-          const uploadResult = await uploadToOSSDirect(blob, filename, userId, (progress) => {
-            console.log(`[ResultsScreen] OSS上传进度: ${progress}%`);
-          });
-          
-          if (uploadResult.success) {
-            finalVideoUrl = uploadResult.url;
-            console.log('[ResultsScreen] OSS上传成功:', finalVideoUrl);
-          } else {
-            throw new Error('上传到OSS失败');
-          }
-        } catch (uploadError) {
-          console.error('[ResultsScreen] OSS上传失败:', uploadError);
-          alert('视频上传到OSS失败，请重试');
-          setKaipaiLoadingId(null);
+      if (clientRenderState.isEnabled) {
+        console.log('[双轨制] 调用 clientRenderPreview...');
+        clientVideoUrl = await clientRenderPreview(item);
+        console.log(`[双轨制] clientRenderPreview 返回: ${clientVideoUrl ? '✅ 成功' : '❌ 失败'}`);
+      } else {
+        console.log('[双轨制] 浏览器WebCodecs未开启');
+      }
+      
+      // 浏览器WebCodecs渲染失败，降级用本地FFmpeg视频①代理
+      if (!clientVideoUrl) {
+        console.log('[双轨制] ⚠️ 轨道②失败，降级使用轨道①作为预览');
+        clientVideoUrl = serverVideoUrl;
+      }
+      
+      setKaipaiLoadingId(null);
+    } else {
+      console.log(`[双轨制] ✅ 轨道②已存在，直接使用`);
+    }
+    
+    console.log(`[双轨制] ========== 视频准备完成 ==========`);
+    console.log(`[双轨制] 📹 轨道① (ASR/导出): ${serverVideoUrl}`);
+    console.log(`[双轨制] 📹 轨道② (预览): ${clientVideoUrl}`);
+    
+    try {
+      console.log(`[双轨制] ========== 创建KaipaiEdit草稿 ==========`);
+      console.log(`[双轨制] 传入参数:`);
+      console.log(`[双轨制]   video_url (轨道①/ASR): ${serverVideoUrl}`);
+      console.log(`[双轨制]   client_video_url (轨道②/预览): ${clientVideoUrl}`);
+      
+      // 检查serverVideoUrl是否是blob URL（不应该传给ASR）
+      if (serverVideoUrl && serverVideoUrl.startsWith('blob:')) {
+        console.error(`[双轨制] ❌ 错误: serverVideoUrl是blob URL，不能用于ASR`);
+        console.error(`[双轨制] ❌ 这会导致后端无法提取音频`);
+        // 尝试使用其他URL
+        if (item.oss_url) {
+          console.log(`[双轨制] ⚠️ 降级使用oss_url: ${item.oss_url}`);
+          serverVideoUrl = item.oss_url;
+        } else {
+          alert('视频URL格式错误，请重新上传素材');
           return;
         }
-        setKaipaiLoadingId(null);
       }
       
       // 创建 KaipaiEdit 任务
+      // 传入视频①的URL（serverVideoUrl）作为ASR和导出的源
       const response = await fetch(`${API_BASE_URL}/api/renders/${item.id}/kaipai/edit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          video_url: finalVideoUrl // 传入OSS URL（客户端渲染场景）
+          video_url: serverVideoUrl, // 视频①：本地FFmpeg高质量视频URL
+          needs_transcode: false, // 视频①已经是本地FFmpeg高质量视频，不需要再转码
+          client_video_url: clientVideoUrl // 视频②：浏览器WebCodecs预览视频URL（可选）
         })
       });
       
@@ -678,12 +841,17 @@ export default function ResultsScreen({
       }
       
       const data = await response.json();
-      console.log('Kaipai edit created:', data);
+      console.log('[双轨制] KaipaiEdit创建成功:', data);
+      
       setKaipaiEditId(data.edit_id);
+      // 视频①：本地FFmpeg高质量视频URL（用于ASR/导出）
       setKaipaiVideoUrl(data.video_url);
+      // 视频②：浏览器WebCodecs预览视频URL（用于编辑器预览播放）
+      setKaipaiClientVideoUrl(clientVideoUrl || data.client_video_url || '');
       setShowKaipaiEditor(true);
     } catch (error: any) {
       alert('创建剪辑任务失败：' + error.message);
+      setKaipaiLoadingId(null);
     }
   }, [results]);
 
@@ -973,7 +1141,8 @@ export default function ResultsScreen({
       {showKaipaiEditor && kaipaiEditId && (
         <KaipaiEditor
           editId={kaipaiEditId}
-          videoUrl={kaipaiVideoUrl}
+          videoUrl={kaipaiVideoUrl}           // 视频①：服务器高质量视频URL（ASR/导出用）
+          clientVideoUrl={kaipaiClientVideoUrl} // 视频②：客户端预览视频URL（预览播放用）
           onBack={handleCloseKaipai}
           onSave={handleCloseKaipai}
         />

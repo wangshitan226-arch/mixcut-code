@@ -128,7 +128,13 @@ def calculate_keep_segments(removed_segments, video_duration_ms, buffer_ms=150):
 
 @kaipai_bp.route('/renders/<render_id>/kaipai/edit', methods=['POST'])
 def create_kaipai_edit(render_id):
-    """创建新的开拍式剪辑任务"""
+    """
+    创建新的开拍式剪辑任务（双轨制版本）
+    
+    双轨制设计：
+    - original_video_url: 视频①，服务器高质量视频URL（用于ASR/导出）
+    - client_video_url:  视频②，客户端预览视频URL（用于编辑器预览播放）
+    """
     try:
         render = Render.query.get(render_id)
         if not render:
@@ -146,16 +152,54 @@ def create_kaipai_edit(render_id):
             existing = KaipaiEdit.query.filter_by(render_id=render_id).count()
             version = existing + 1
         
-        # 检查是否有OSS URL
-        video_url = render.oss_url
+        # ========== 双轨制：获取视频URL ==========
+        # 视频①：服务器高质量视频URL（优先使用前端传入的，其次是数据库中的）
+        server_video_url = data.get('video_url') or render.server_video_url or render.oss_url
         
-        # 允许前端传入video_url（客户端渲染场景）
-        if not video_url:
-            video_url = data.get('video_url')
+        # 视频②：客户端预览视频URL（可选，用于编辑器预览）
+        client_video_url = data.get('client_video_url')
         
-        if not video_url:
-            return jsonify({'error': '视频尚未上传到OSS，请稍后再试', 'code': 'NO_OSS_URL'}), 400
-    
+        if not server_video_url:
+            return jsonify({
+                'error': '视频①（服务器高质量视频）尚未准备好，请稍后再试',
+                'code': 'NO_SERVER_VIDEO'
+            }), 400
+        
+        # 双轨制下，视频①已经是服务器高质量视频，不需要云端转码
+        # 旧的转码逻辑保留用于兼容非双轨模式
+        needs_transcode = data.get('needs_transcode', False)
+        final_video_url = server_video_url
+        
+        if needs_transcode:
+            try:
+                from utils.cloud_transcoder import submit_transcode_async
+
+                timestamp = int(time.time())
+                output_filename = f"transcoded_{render_id}_{timestamp}.mp4"
+                output_url = f"https://mixcut.oss-cn-hangzhou.aliyuncs.com/renders/{user_id or 'anonymous'}/{output_filename}"
+
+                logger.info(f"[Kaipai] 提交云端转码任务，输入: {server_video_url}")
+
+                transcode_task_id = submit_transcode_async(
+                    input_url=server_video_url,
+                    output_url=output_url,
+                    quality='high',
+                    user_id=user_id or render.user_id or 'anonymous',
+                    render_id=render_id
+                )
+                
+                return jsonify({
+                    'edit_id': None,
+                    'version': version,
+                    'status': 'transcoding',
+                    'transcode_task_id': transcode_task_id,
+                    'message': '视频正在进行云端转码，请稍后再试'
+                })
+                
+            except Exception as e:
+                logger.warning(f"[Kaipai] 云端转码提交失败，使用原始视频: {e}")
+        
+        # 创建草稿
         edit = KaipaiEdit(
             id=str(uuid.uuid4()),
             user_id=user_id or render.user_id,
@@ -163,22 +207,90 @@ def create_kaipai_edit(render_id):
             parent_id=parent_id,
             version=version,
             title=data.get('title', f'草稿 {version}'),
-            original_video_url=video_url,
+            original_video_url=final_video_url,  # 视频①：服务器高质量视频
             status='draft'
         )
         
         db.session.add(edit)
         db.session.commit()
         
+        logger.info(f"[Kaipai] 草稿创建成功: edit_id={edit.id}, render_id={render_id}")
+        logger.info(f"[Kaipai] 视频①（ASR/导出用）: {final_video_url}")
+        logger.info(f"[Kaipai] 视频②（预览用）: {client_video_url or '未提供'}")
+        
         return jsonify({
             'edit_id': edit.id,
             'version': version,
             'status': 'draft',
-            'video_url': video_url
+            'video_url': final_video_url,
+            'client_video_url': client_video_url  # 返回视频②URL给前端预览用
         })
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': f'创建剪辑任务失败: {str(e)}'}), 500
+
+
+@kaipai_bp.route('/kaipai/transcode/<task_id>/status', methods=['GET'])
+def get_transcode_status_route(task_id):
+    """
+    查询云端转码任务状态
+    
+    前端在创建草稿时如果返回 transcoding 状态，需要轮询此接口
+    转码完成后，自动更新数据库中的 output_video_url
+    """
+    try:
+        from utils.cloud_transcoder import get_async_transcode_status, transcode_tasks
+        
+        logger.info(f"[Transcode] 查询转码状态: task_id={task_id}")
+        status = get_async_transcode_status(task_id)
+        logger.info(f"[Transcode] 转码状态: {status}")
+        
+        if status['status'] == 'completed':
+            output_url = status.get('output_url')
+            logger.info(f"[Transcode] 转码完成: output_url={output_url}")
+            
+            # 自动更新数据库中的 output_video_url
+            task_info = transcode_tasks.get(task_id, {})
+            render_id = task_info.get('render_id')
+            logger.info(f"[Transcode] 任务信息: render_id={render_id}")
+            
+            if render_id and output_url:
+                try:
+                    # 查找关联的 edit 并更新 output_video_url
+                    edit = KaipaiEdit.query.filter_by(render_id=render_id).first()
+                    if edit:
+                        logger.info(f"[Transcode] 找到关联edit: edit_id={edit.id}")
+                        logger.info(f"[Transcode] 更新前: output_video_url={edit.output_video_url}")
+                        edit.output_video_url = output_url
+                        db.session.commit()
+                        logger.info(f"[Transcode] ✓ 已更新 edit {edit.id} 的 output_video_url 为: {output_url}")
+                    else:
+                        logger.warning(f"[Transcode] ✗ 未找到关联edit: render_id={render_id}")
+                except Exception as update_err:
+                    logger.error(f"[Transcode] 更新数据库失败: {update_err}")
+            else:
+                logger.warning(f"[Transcode] 无法更新: render_id={render_id}, output_url={output_url}")
+            
+            return jsonify({
+                'status': 'completed',
+                'output_url': output_url,
+                'progress': 100
+            })
+        elif status['status'] == 'failed':
+            return jsonify({
+                'status': 'failed',
+                'error': status.get('error', '转码失败'),
+                'progress': 0
+            })
+        else:
+            return jsonify({
+                'status': 'processing',
+                'progress': status.get('progress', 0)
+            })
+    
+    except Exception as e:
+        logger.error(f"查询转码状态失败: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @kaipai_bp.route('/kaipai/<edit_id>/transcribe', methods=['POST'])
@@ -1121,12 +1233,18 @@ def get_kaipai_versions(render_id):
 @kaipai_bp.route('/users/<user_id>/kaipai/drafts', methods=['GET'])
 def get_user_drafts(user_id):
     """获取用户的所有草稿（用于首页显示）"""
-    drafts = KaipaiEdit.query.filter_by(user_id=user_id).order_by(KaipaiEdit.updated_at.desc()).all()
-    
-    return jsonify({
-        'user_id': user_id,
-        'drafts': [d.to_dict() for d in drafts]
-    })
+    try:
+        drafts = KaipaiEdit.query.filter_by(user_id=user_id).order_by(KaipaiEdit.updated_at.desc()).all()
+        
+        return jsonify({
+            'user_id': user_id,
+            'drafts': [d.to_dict() for d in drafts]
+        })
+    except Exception as e:
+        logger.error(f"获取用户草稿失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 @kaipai_bp.route('/kaipai/<edit_id>/title', methods=['PUT'])
@@ -1401,11 +1519,29 @@ def _render_with_template_optimized_impl(app, edit, sentences, removed_ids, asr_
     try:
         _update_render_task(task_id, progress=10)
         
-        video_url = edit.original_video_url
+        # 详细记录视频选择逻辑
+        logger.info(f"[Task {task_id}] ========== 视频选择开始 ==========")
+        logger.info(f"[Task {task_id}] edit.id: {edit.id}")
+        logger.info(f"[Task {task_id}] edit.render_id: {edit.render_id}")
+        logger.info(f"[Task {task_id}] edit.original_video_url: {edit.original_video_url}")
+        logger.info(f"[Task {task_id}] edit.output_video_url: {edit.output_video_url}")
+        logger.info(f"[Task {task_id}] output_video_url 是否存在: {bool(edit.output_video_url)}")
+        
+        # 优先使用转码后的视频（如果存在且可用）
+        if edit.output_video_url and edit.output_video_url.strip():
+            video_url = edit.output_video_url
+            logger.info(f"[Task {task_id}] ✓ 选择转码后的视频（高质量）")
+            logger.info(f"[Task {task_id}] ✓ 视频URL: {video_url}")
+        else:
+            video_url = edit.original_video_url
+            logger.info(f"[Task {task_id}] ✗ 转码视频不可用，使用原始视频")
+            logger.info(f"[Task {task_id}] ✗ 视频URL: {video_url}")
+        
         user_id = edit.user_id
         
+        logger.info(f"[Task {task_id}] ========== 视频选择结束 ==========")
         logger.info(f"[Task {task_id}] ICE直接裁剪模式开始...")
-        logger.info(f"[Task {task_id}] 原始视频: {video_url[:80]}...")
+        logger.info(f"[Task {task_id}] 最终输入视频: {video_url[:100]}...")
         
         # 获取视频时长
         video_duration_ms = asr_result.get('videoInfo', {}).get('duration', 0) * 1000

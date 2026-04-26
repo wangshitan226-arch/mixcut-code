@@ -105,6 +105,11 @@ class Render(db.Model):
     oss_url = db.Column(db.String(500))    # OSS URL（用于下载/文字快剪）
     status = db.Column(db.String(20), default='pending')
     created_at = db.Column(db.DateTime, default=db.func.now())
+    
+    # 双轨视频字段
+    server_video_url = db.Column(db.String(500))  # 视频①：服务器高质量拼接视频URL（用于ASR/导出）
+    server_video_status = db.Column(db.String(20), default='pending')  # pending, processing, completed, failed
+    client_video_url = db.Column(db.String(500))  # 视频②：客户端拼接视频URL（Blob URL，仅前端使用）
 
 
 class Template(db.Model):

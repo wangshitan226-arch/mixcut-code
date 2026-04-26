@@ -265,80 +265,107 @@ export default function EditScreen({
     fileInputRef.current?.click();
   };
 
-  // 客户端渲染模式：本地处理素材并上传元数据
+  // 客户端渲染模式：双轨并行制
+  // 轨道1: 浏览器 WebCodecs 本地转码 (视频② - 用于预览)
+  // 轨道2: 服务器 FFmpeg 转码 (视频① - 用于ASR和导出)
   const handleClientSideUpload = async (file: File, shotId: number) => {
     setUploading({ shotId, progress: 0 });
-    console.log('[EditScreen] ====== 开始客户端渲染上传 ======');
+    console.log('[EditScreen] ====== 开始双轨并行上传 ======');
     console.log('[EditScreen] 文件名:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
-    console.log('[EditScreen] 客户端渲染状态:', clientRenderState.isEnabled ? '已开启' : '已关闭');
 
     try {
-      // 1. 本地转码处理
-      console.log('[EditScreen] 步骤1/3: 本地FFmpeg转码...');
-
       // 生成素材ID（确保前后端一致）
       const materialId = `mat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       console.log('[EditScreen] 生成素材ID:', materialId);
 
-      const processed = await processMaterial(file, {
+      // ========== 双轨并行处理 ==========
+      console.log('[EditScreen] 启动双轨并行处理...');
+
+      // 轨道1: 浏览器 WebCodecs 本地转码 (0-40% 进度)
+      const browserTrackPromise = processMaterial(file, {
         quality: clientRenderState.capability?.recommendedQuality || 'medium',
         generateThumbnail: true,
-        materialId,  // 传入自定义ID，确保前后端一致
+        materialId,
         onProgress: (progress, stage) => {
-          // 转码阶段占 0-80%
-          setUploading({ shotId, progress: Math.round(progress * 0.8) });
+          setUploading({ shotId, progress: Math.round(progress * 0.4) });
         },
-      });
-      console.log('[EditScreen] 本地转码完成:', processed.id, '时长:', processed.duration, '大小:', (processed.size / 1024 / 1024).toFixed(2), 'MB');
-
-      // 保存到本地素材映射
-      setClientProcessedMaterials(prev => new Map(prev).set(processed.id, processed));
-
-      // 2. 上传元数据到服务器（视频保留在本地）
-      console.log('[EditScreen] 步骤2/3: 上传元数据到服务器...');
-      setUploading({ shotId, progress: 85 });
-
-      const formData = new FormData();
-      formData.append('user_id', userId);
-      formData.append('shot_id', shotId.toString());
-      formData.append('material_id', processed.id);
-      formData.append('duration', processed.duration.toString());
-      formData.append('width', processed.width.toString());
-      formData.append('height', processed.height.toString());
-      formData.append('file_size', processed.size.toString());
-      formData.append('is_local', 'true');
-
-      // 上传缩略图
-      if (processed.thumbnailBlob) {
-        formData.append('thumbnail', processed.thumbnailBlob, 'thumbnail.jpg');
-      }
-
-      const response = await fetch(`${API_BASE_URL}/api/materials/metadata`, {
-        method: 'POST',
-        body: formData,
+      }).then(processed => {
+        console.log('[EditScreen] 轨道1完成(浏览器转码):', processed.id);
+        setClientProcessedMaterials(prev => new Map(prev).set(processed.id, processed));
+        return processed;
       });
 
-      if (!response.ok) {
-        // 如果元数据接口不存在，降级到原有上传接口
-        console.warn('[EditScreen] 元数据接口不可用(状态码:' + response.status + ')，降级到服务器上传');
-        await handleServerSideUpload(file, shotId);
-        return;
-      }
+      // 轨道2: 服务器上传 + FFmpeg 转码 (0-50% 进度)
+      const serverTrackPromise = (async () => {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('user_id', userId);
+        formData.append('shotId', shotId.toString());
+        formData.append('quality', selectedQuality);
+        // 传入 material_id 确保前后端使用相同ID
+        formData.append('material_id', materialId);
 
-      const result = await response.json();
-      console.log('[EditScreen] 元数据上传完成:', result);
-      console.log('[EditScreen] ====== 客户端渲染上传成功 ======');
+        return new Promise<any>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+
+          xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) {
+              const uploadProgress = Math.round((e.loaded / e.total) * 50);
+              // 更新进度，但不超过当前显示值（避免和浏览器轨道冲突）
+              setUploading(prev => ({
+                shotId,
+                progress: Math.max(prev.progress, uploadProgress)
+              }));
+            }
+          });
+
+          xhr.addEventListener('load', () => {
+            if (xhr.status === 200) {
+              const result = JSON.parse(xhr.responseText);
+              console.log('[EditScreen] 轨道2完成(服务器上传):', result.id);
+              resolve(result);
+            } else {
+              reject(new Error('服务器上传失败'));
+            }
+          });
+
+          xhr.addEventListener('error', () => reject(new Error('上传失败')));
+          xhr.addEventListener('abort', () => reject(new Error('上传被取消')));
+
+          xhr.open('POST', `${API_BASE_URL}/api/upload`);
+          xhr.send(formData);
+        });
+      })();
+
+      // 等待双轨都完成
+      const [browserResult, serverResult] = await Promise.all([
+        browserTrackPromise,
+        serverTrackPromise
+      ]);
+
+      console.log('[EditScreen] 双轨处理完成:');
+      console.log('  - 浏览器轨道:', browserResult.id, '本地URL:', browserResult.videoUrl);
+      console.log('  - 服务器轨道:', serverResult.id, '服务器路径:', serverResult.url);
+
+      // 如果服务器返回了转码任务ID，开始跟踪转码状态
+      if (serverResult.transcode_task_id) {
+        console.log('[EditScreen] 服务器转码任务:', serverResult.transcode_task_id);
+        setTranscodingMaterials(prev => new Set(prev).add(serverResult.id));
+        setTimeout(() => {
+          checkTranscodeStatusImmediately(serverResult.transcode_task_id, serverResult.id);
+        }, 100);
+      }
 
       setUploading({ shotId, progress: 100 });
+      console.log('[EditScreen] ====== 双轨并行上传成功 ======');
 
       // 刷新镜头数据
       onRefresh();
 
     } catch (error) {
-      console.error('[EditScreen] 客户端处理失败:', error);
-      // 降级到服务器上传
-      alert('客户端处理失败，尝试服务器上传...');
-      await handleServerSideUpload(file, shotId);
+      console.error('[EditScreen] 双轨处理失败:', error);
+      alert('上传失败，请重试');
+      throw error;
     } finally {
       setUploading({ shotId: null, progress: 0 });
       setActiveShotId(null);

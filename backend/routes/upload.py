@@ -92,6 +92,8 @@ def upload_file():
         user_id = request.form.get('user_id')
         shot_id = request.form.get('shotId')
         quality = request.form.get('quality', 'medium')
+        # 接受前端传入的 material_id（双轨制需要前后端ID一致）
+        material_id = request.form.get('material_id')
         
         if not user_id:
             return jsonify({'error': '没有指定用户ID'}), 400
@@ -118,7 +120,9 @@ def upload_file():
         # This ensures old renders don't show outdated content
         clear_all_user_renders(user_id)
         
-        material_id = str(uuid.uuid4())
+        # 如果前端没有传入 material_id，则生成新的
+        if not material_id:
+            material_id = str(uuid.uuid4())
         ext = file.filename.rsplit('.', 1)[1].lower()
         filename = f"{material_id}.{ext}"
         filepath = os.path.join(UPLOAD_FOLDER, filename)
@@ -254,10 +258,11 @@ def download_material(material_id):
 @upload_bp.route('/materials/metadata', methods=['POST'])
 def upload_material_metadata():
     """
-    上传素材元数据（客户端渲染模式）
+    上传素材元数据（客户端渲染模式 + 双轨制本地FFmpeg转码）
     
-    当客户端渲染开启时，视频文件在浏览器本地处理（转码、存储），
-    前端只上传素材的元数据到服务器，服务器不需要存储视频文件。
+    双轨制设计：
+    1. 浏览器WebCodecs转码 → 存浏览器本地（视频②预览用）
+    2. 本地FFmpeg转码 → 存服务器磁盘 unified/ 文件夹（视频①ASR/导出用）
     
     请求参数：
     - user_id: 用户ID
@@ -267,7 +272,7 @@ def upload_material_metadata():
     - width: 视频宽度
     - height: 视频高度
     - file_size: 文件大小（字节）
-    - is_local: 是否为本地素材（固定为true）
+    - video_file: 原始视频文件（用于本地FFmpeg转码）
     - thumbnail: 缩略图文件（可选）
     """
     try:
@@ -308,29 +313,54 @@ def upload_material_metadata():
                 thumbnail_path = os.path.join(THUMBNAIL_FOLDER, thumbnail_filename)
                 thumbnail_file.save(thumbnail_path)
         
-        # 如果没有上传缩略图，生成一个默认的
-        if not thumbnail_path:
-            thumbnail_filename = f"{material_id}_thumb.jpg"
-            thumbnail_path = os.path.join(THUMBNAIL_FOLDER, thumbnail_filename)
-            # 创建一个空的占位缩略图（前端应该上传缩略图）
-            # 这里简单处理：复制一个默认缩略图或留空
-            # 实际使用时前端应该上传缩略图
-        
         # 转换时长为字符串格式
         duration_seconds = float(duration)
         minutes = int(duration_seconds // 60)
         seconds = int(duration_seconds % 60)
         duration_str = f"{minutes}:{seconds:02d}"
         
-        # 创建素材记录（标记为本地素材）
+        # ========== 双轨制：本地FFmpeg转码 ==========
+        # 检查是否有原始视频文件上传（用于本地FFmpeg转码）
+        file_path = 'local'  # 默认标记为本地素材
+        unified_path = None  # 等待本地FFmpeg转码完成
+        
+        if 'video_file' in request.files:
+            video_file = request.files['video_file']
+            if video_file and video_file.filename:
+                # 保存原始视频文件到 uploads/ 文件夹
+                ext = video_file.filename.rsplit('.', 1)[1].lower() if '.' in video_file.filename else 'mp4'
+                filename = f"{material_id}.{ext}"
+                filepath = os.path.join(UPLOAD_FOLDER, filename)
+                video_file.save(filepath)
+                file_path = filepath
+                print(f"[双轨制] 原始视频已保存: {filepath}")
+                
+                # 设置 unified_path（本地FFmpeg转码输出路径）
+                unified_filename = f"{material_id}_unified.mp4"
+                unified_path = os.path.join(UNIFIED_FOLDER, unified_filename)
+                
+                # 启动本地FFmpeg转码（异步）
+                task_id = f"transcode_{material_id}"
+                app = current_app._get_current_object()
+                thread = threading.Thread(
+                    target=async_transcode_task,
+                    args=(task_id, material_id, filepath, unified_path, 'medium', app, user_id)
+                )
+                thread.daemon = True
+                thread.start()
+                print(f"[双轨制] 本地FFmpeg转码已启动: {material_id}")
+        else:
+            print(f"[双轨制] 没有上传原始视频文件，跳过本地FFmpeg转码")
+        
+        # 创建素材记录
         material = Material(
             id=material_id,
             user_id=user_id,
             shot_id=shot_id,
             type='video',
             original_name='local_video.mp4',
-            file_path='local',  # 本地素材，文件路径标记为 local
-            unified_path='local',  # 本地素材已转码，标记为 local
+            file_path=file_path,
+            unified_path=unified_path,
             thumbnail_path=thumbnail_path,
             duration=duration_str,
             duration_seconds=duration_seconds,
@@ -355,8 +385,9 @@ def upload_material_metadata():
             'duration': duration_str,
             'originalName': 'local_video.mp4',
             'is_local': True,
-            'transcode_status': 'completed',  # 本地素材已完成转码
-            'message': '素材元数据已保存（客户端本地渲染）'
+            'transcode_status': 'processing' if unified_path else 'completed',
+            'transcode_task_id': f"transcode_{material_id}" if unified_path else None,
+            'message': '素材元数据已保存，本地FFmpeg转码中' if unified_path else '素材元数据已保存（客户端本地渲染）'
         })
         
     except Exception as e:

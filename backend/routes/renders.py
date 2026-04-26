@@ -13,6 +13,7 @@ import threading
 import json
 import time
 import logging
+import subprocess
 from models import User, Render, Material
 from extensions import db, render_tasks
 from config import RENDERS_FOLDER
@@ -579,6 +580,298 @@ def proxy_video():
         import traceback
         logger.error(f"[Proxy] 代理下载视频失败: {e}")
         logger.error(f"[Proxy] 详细错误: {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+
+def server_concat_task(task_id, combo_id, unified_files, output_path, user_id=None, app=None):
+    """
+    服务器高质量拼接任务（视频①）
+    拼接完成后上传到OSS，供ASR和导出使用
+    """
+    if app is None:
+        from app_new import create_app
+        app = create_app()
+    
+    with app.app_context():
+        db.app = app
+        
+        render_tasks[task_id] = {
+            'id': task_id,
+            'combo_id': combo_id,
+            'status': 'processing',
+            'progress': 0,
+            'output_path': output_path,
+            'type': 'server_concat'
+        }
+        
+        try:
+            render_tasks[task_id]['progress'] = 30
+            # 使用高质量参数拼接
+            success = fast_concat_videos(unified_files, output_path, quality='high')
+            
+            if success and os.path.exists(output_path):
+                render_tasks[task_id]['progress'] = 70
+                
+                # 更新数据库：标记服务器视频处理中
+                try:
+                    render = Render.query.get(combo_id)
+                    if render:
+                        render.server_video_status = 'processing'
+                        db.session.commit()
+                except Exception as db_error:
+                    print(f"[SERVER_RENDER] 数据库更新失败: {db_error}")
+                    db.session.rollback()
+                
+                # 上传到OSS
+                def oss_callback(oss_url, success):
+                    if success and oss_url:
+                        render_tasks[task_id]['oss_url'] = oss_url
+                        render_tasks[task_id]['status'] = 'completed'
+                        render_tasks[task_id]['progress'] = 100
+                        
+                        # 更新数据库
+                        with app.app_context():
+                            try:
+                                render = Render.query.get(combo_id)
+                                if render:
+                                    render.server_video_url = oss_url
+                                    render.server_video_status = 'completed'
+                                    db.session.commit()
+                                    print(f"[SERVER_RENDER] 视频①已生成并上传: {combo_id} -> {oss_url}")
+                            except Exception as e:
+                                print(f"[SERVER_RENDER] 更新数据库失败: {e}")
+                                db.session.rollback()
+                    else:
+                        render_tasks[task_id]['status'] = 'failed'
+                        render_tasks[task_id]['error'] = 'OSS上传失败'
+                        
+                        with app.app_context():
+                            try:
+                                render = Render.query.get(combo_id)
+                                if render:
+                                    render.server_video_status = 'failed'
+                                    db.session.commit()
+                            except Exception as e:
+                                db.session.rollback()
+                
+                try:
+                    user = User.query.get(user_id) if user_id else None
+                except:
+                    user = None
+                
+                print(f"[SERVER_RENDER] 开始上传视频①到OSS: {combo_id}")
+                oss_client.upload_render_async(
+                    local_path=output_path,
+                    render_id=combo_id,
+                    user_id=user_id,
+                    user_obj=user,
+                    callback=oss_callback
+                )
+                
+            else:
+                render_tasks[task_id]['status'] = 'failed'
+                render_tasks[task_id]['error'] = 'Concat failed'
+                
+                with app.app_context():
+                    try:
+                        render = Render.query.get(combo_id)
+                        if render:
+                            render.server_video_status = 'failed'
+                            db.session.commit()
+                    except Exception as e:
+                        db.session.rollback()
+                
+        except Exception as e:
+            print(f"[SERVER_RENDER] 任务失败: {e}")
+            import traceback
+            traceback.print_exc()
+            render_tasks[task_id]['status'] = 'failed'
+            render_tasks[task_id]['error'] = str(e)
+            
+            with app.app_context():
+                try:
+                    render = Render.query.get(combo_id)
+                    if render:
+                        render.server_video_status = 'failed'
+                        db.session.commit()
+                except Exception as e:
+                    db.session.rollback()
+
+
+def fast_concat_copy(unified_files, output_path):
+    """
+    秒级拼接视频（-c copy 不重新编码）
+    用于生成本地FFmpeg高质量视频（视频①）
+    """
+    import uuid
+    if not unified_files:
+        return False
+    
+    list_file = os.path.join(RENDERS_FOLDER, f"list_{uuid.uuid4().hex[:8]}.txt")
+    with open(list_file, 'w') as f:
+        for filepath in unified_files:
+            abs_path = os.path.abspath(filepath)
+            f.write(f"file '{abs_path}'\n")
+    
+    try:
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', list_file,
+            '-c', 'copy',           # 不重新编码，秒级完成
+            '-movflags', '+faststart',
+            output_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"[fast_concat_copy] FFmpeg error: {result.stderr}")
+        return result.returncode == 0
+    finally:
+        if os.path.exists(list_file):
+            os.remove(list_file)
+
+
+@renders_bp.route('/combinations/<combo_id>/server-render', methods=['POST'])
+def start_server_render(combo_id):
+    """
+    启动本地FFmpeg秒级拼接（视频①）
+    
+    流程：
+    1. 同步秒级拼接（-c copy，立即完成）
+    2. 同步上传OSS（等待上传完成）
+    3. 返回OSS URL（用于ASR/导出）
+    """
+    try:
+        parts = combo_id.split('_')
+        if len(parts) < 3 or parts[0] != 'combo':
+            return jsonify({'error': '无效的组合ID'}), 400
+        
+        user_id = parts[1]
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+        
+        render = Render.query.get(combo_id)
+        if not render or render.user_id != user_id:
+            return jsonify({'error': '组合不存在'}), 404
+        
+        # 检查是否已有OSS视频
+        if render.server_video_url:
+            return jsonify({
+                'status': 'completed',
+                'video_url': render.server_video_url,
+                'message': '视频①已存在'
+            })
+        
+        # 获取素材文件（优先使用unified_path，已经是统一格式）
+        material_ids = json.loads(render.material_ids)
+        material_files = []
+        
+        for mat_id in material_ids:
+            material = Material.query.get(mat_id)
+            if material and material.user_id == user_id:
+                if material.unified_path and os.path.exists(material.unified_path):
+                    material_files.append(material.unified_path)
+                elif material.file_path and os.path.exists(material.file_path):
+                    material_files.append(material.file_path)
+        
+        if not material_files:
+            return jsonify({'error': '素材文件不存在'}), 404
+        
+        # ========== 同步秒级拼接（-c copy） ==========
+        timestamp = int(time.time())
+        output_filename = f"combo_{combo_id}_{timestamp}.mp4"
+        output_path = os.path.join(RENDERS_FOLDER, output_filename)
+        
+        print(f"[server-render] 开始秒级拼接: {combo_id}")
+        success = fast_concat_copy(material_files, output_path)
+        
+        if not success or not os.path.exists(output_path):
+            return jsonify({'error': '本地FFmpeg秒级拼接失败'}), 500
+        
+        print(f"[server-render] 秒级拼接完成: {output_path}")
+        
+        # 更新数据库：保存本地文件路径
+        render.file_path = output_path
+        render.server_video_status = 'uploading'
+        db.session.commit()
+        
+        # ========== 同步上传OSS（等待完成） ==========
+        print(f"[server-render] 开始同步上传OSS: {combo_id}")
+        
+        oss_url = None
+        try:
+            user_obj = User.query.get(user_id)
+            # 使用同步上传（阻塞等待）
+            oss_url = oss_client.upload_render(
+                local_path=output_path,
+                render_id=combo_id,
+                user_id=user_id,
+                user_obj=user_obj
+            )
+            print(f"[server-render] OSS上传完成: {combo_id} -> {oss_url}")
+        except Exception as e:
+            print(f"[server-render] OSS上传失败: {combo_id} - {e}")
+            return jsonify({
+                'status': 'local_ready',
+                'video_url': f"http://localhost:3002/renders/{output_filename}",
+                'error': f'OSS上传失败: {str(e)}'
+            }), 500
+        
+        if oss_url:
+            # 更新数据库：保存OSS URL
+            render.server_video_url = oss_url
+            render.server_video_status = 'completed'
+            db.session.commit()
+            
+            return jsonify({
+                'status': 'completed',
+                'video_url': oss_url,  # OSS URL，可直接用于ASR
+                'message': '本地FFmpeg秒级拼接完成，OSS上传完成'
+            })
+        else:
+            return jsonify({
+                'status': 'failed',
+                'error': 'OSS上传返回空URL'
+            }), 500
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@renders_bp.route('/combinations/<combo_id>/server-render/status', methods=['GET'])
+def get_server_render_status(combo_id):
+    """获取视频①（本地FFmpeg高质量视频）的状态"""
+    try:
+        render = Render.query.get(combo_id)
+        if not render:
+            return jsonify({'error': '组合不存在'}), 404
+        
+        # 检查OSS是否已完成
+        if render.server_video_url:
+            return jsonify({
+                'status': 'completed',
+                'video_url': render.server_video_url,
+                'progress': 100
+            })
+        
+        # 检查本地文件是否已生成
+        if render.file_path and os.path.exists(render.file_path):
+            local_url = f"http://localhost:3002/renders/{os.path.basename(render.file_path)}"
+            return jsonify({
+                'status': 'local_ready',
+                'video_url': local_url,
+                'progress': 50,
+                'message': '本地FFmpeg拼接完成，OSS上传中'
+            })
+        
+        return jsonify({
+            'status': render.server_video_status or 'pending',
+            'progress': 0
+        })
+        
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 

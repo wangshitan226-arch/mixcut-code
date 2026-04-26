@@ -34,10 +34,11 @@ RENDER_MAX_AGE_HOURS = 24
 OSS_CONFIG = {
     # 阿里云OSS配置
     # 从环境变量读取敏感信息
-    'access_key_id': os.environ.get('OSS_ACCESS_KEY_ID', ''),
-    'access_key_secret': os.environ.get('OSS_ACCESS_KEY_SECRET', ''),
-    'endpoint': 'oss-cn-beijing.aliyuncs.com',  # 华北2(北京)
-    'bucket_name': 'fengma-materials',
+
+    #'access_key_id': os.environ.get('OSS_ACCESS_KEY_ID', ''),
+    #'access_key_secret': os.environ.get('OSS_ACCESS_KEY_SECRET', ''),
+    'endpoint': 'oss-cn-hangzhou.aliyuncs.com',  # 华东1(杭州)
+    'bucket_name': 'mixcut',
     'cdn_domain': '',  # 可选，如配置了CDN加速域名
 }
 
@@ -50,7 +51,7 @@ ICE_CONFIG = {
     # 用于模板渲染
     'access_key_id': os.environ.get('ICE_ACCESS_KEY_ID', OSS_CONFIG['access_key_id']),
     'access_key_secret': os.environ.get('ICE_ACCESS_KEY_SECRET', OSS_CONFIG['access_key_secret']),
-    'region': 'cn-beijing',  # 服务所在地域
+    'region': 'cn-hangzhou',  # 服务所在地域
 }
 
 # 是否启用ICE模板渲染

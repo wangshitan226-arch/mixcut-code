@@ -1443,7 +1443,7 @@ def submit_ice_job(timeline: Dict, user_id: str, output_filename: Optional[str] 
     if not output_filename:
         output_filename = f"template_render_{user_id}_{timestamp}.mp4"
     
-    output_url = f"https://{OSS_CONFIG['bucket_name']}.oss-cn-beijing.aliyuncs.com/renders/{user_id}/{output_filename}"
+    output_url = f"https://{OSS_CONFIG['bucket_name']}.oss-cn-hangzhou.aliyuncs.com/renders/{user_id}/{output_filename}"
     
     output_config = {
         "MediaURL": output_url,

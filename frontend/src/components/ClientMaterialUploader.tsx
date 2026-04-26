@@ -41,58 +41,50 @@ export default function ClientMaterialUploader({
     setStage('准备处理...');
 
     try {
-      // 1. 本地转码
-      setStage('正在转码...');
-      const processed = await processMaterial(file, {
+      // 双轨并行制：同时启动浏览器转码和服务器转码
+      setStage('双轨并行处理中...');
+
+      // 轨道1: 浏览器 WebCodecs 本地转码 (视频② - 用于预览)
+      const browserTrackPromise = processMaterial(file, {
         quality: 'medium',
         generateThumbnail: true,
         onProgress: (progress, stage) => {
-          setProgress(Math.round(progress));
-          setStage(stage === 'fast_transcoding' ? '快速转码...' : 
-                   stage === 'transcoding' ? '转码中...' : 
-                   stage === 'remuxing' ? '封装中...' : '处理中...');
+          // 浏览器轨道进度占 0-50%
+          setProgress(Math.round(progress * 0.5));
         },
       });
 
-      // 2. 上传到服务器（只上传元数据和缩略图，视频保留在本地）
-      setStage('上传元数据...');
-      setProgress(90);
+      // 轨道2: 服务器 FFmpeg 转码 (视频① - 用于ASR和导出)
+      // 使用已有接口 /api/upload，它会自动保存到 uploads/ 并启动 FFmpeg 转码到 unified/
+      const serverTrackPromise = (async () => {
+        const formData = new FormData();
+        formData.append('user_id', userId);
+        formData.append('shotId', shotId.toString());
+        formData.append('file', file);
+        formData.append('quality', 'medium');
 
-      const formData = new FormData();
-      formData.append('user_id', userId);
-      formData.append('shot_id', shotId.toString());
-      formData.append('material_id', processed.id);
-      formData.append('duration', processed.duration.toString());
-      formData.append('width', processed.width.toString());
-      formData.append('height', processed.height.toString());
-      formData.append('file_size', processed.size.toString());
-      
-      // 上传缩略图
-      if (processed.thumbnailBlob) {
-        formData.append('thumbnail', processed.thumbnailBlob, 'thumbnail.jpg');
-      }
+        const response = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
 
-      const response = await fetch('/api/materials/metadata', {
-        method: 'POST',
-        body: formData,
-      });
+        if (!response.ok) {
+          throw new Error('上传原始视频到本地失败');
+        }
 
-      if (!response.ok) {
-        throw new Error('上传元数据失败');
-      }
+        return response.json();
+      })();
 
-      const result = await response.json();
-
-      // 3. 保存视频到本地存储
-      setStage('保存到本地...');
-      setProgress(95);
-
-      // 视频已保存在 OPFS/IndexedDB 中（processMaterial 内部已处理）
+      // 等待双轨都完成
+      const [processed, serverResult] = await Promise.all([
+        browserTrackPromise,
+        serverTrackPromise
+      ]);
 
       setProgress(100);
-      setStage('完成');
+      setStage('双轨处理完成');
 
-      // 返回素材信息
+      // 返回素材信息（包含双轨数据）
       onUploadComplete({
         id: processed.id,
         shot_id: shotId,
@@ -100,8 +92,12 @@ export default function ClientMaterialUploader({
         duration: processed.duration,
         width: processed.width,
         height: processed.height,
-        thumbnail_url: result.thumbnail_url,
-        is_local: true, // 标记为本地素材
+        thumbnail_url: serverResult.thumbnail_url,
+        is_local: true,
+        // 双轨数据
+        browser_video_url: processed.videoUrl,  // 视频②: 浏览器本地转码结果
+        server_video_path: serverResult.file_path,  // 视频①: 服务器原始文件路径
+        server_unified_path: serverResult.unified_path,  // 视频①: 服务器 FFmpeg 转码结果
       });
 
     } catch (error) {

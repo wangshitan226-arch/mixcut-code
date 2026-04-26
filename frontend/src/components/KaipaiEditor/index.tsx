@@ -35,7 +35,8 @@ interface Template {
 
 interface KaipaiEditorProps {
   editId: string;
-  videoUrl: string;
+  videoUrl: string;          // 视频①：服务器高质量视频URL（用于ASR/导出）
+  clientVideoUrl?: string;   // 视频②：客户端预览视频URL（用于编辑器预览播放）
   onBack: () => void;
   onSave?: () => void;
 }
@@ -43,6 +44,7 @@ interface KaipaiEditorProps {
 export default function KaipaiEditor({
   editId,
   videoUrl,
+  clientVideoUrl,
   onBack,
   onSave,
 }: KaipaiEditorProps) {
@@ -110,27 +112,34 @@ export default function KaipaiEditor({
         }
         const draftData = await draftResponse.json();
 
-        // 保存原始视频URL
+        // 保存原始视频URL（视频①：服务器高质量视频，用于ASR/导出）
         if (draftData.original_video_url) {
           setOriginalVideoUrl(draftData.original_video_url);
-          // 初始化预览视频URL（优先使用已导出的视频）
-          // 后端返回的是 output_video_url 字段
+          
+          // ========== 双轨制：预览视频URL选择 ==========
+          // 优先级：1. 已导出视频 2. 视频②（客户端预览视频）3. 视频①（服务器高质量视频）
           const exportedUrl = draftData.output_video_url || draftData.output_url;
           if (exportedUrl) {
             setPreviewVideoUrl(exportedUrl);
             setOutputUrl(exportedUrl);
             console.log('[预览] 使用已导出的视频:', exportedUrl);
+          } else if (clientVideoUrl) {
+            // 使用视频②（客户端预览视频）进行预览播放
+            setPreviewVideoUrl(clientVideoUrl);
+            console.log('[预览] 使用视频②（客户端预览视频）:', clientVideoUrl);
           } else {
+            // 降级使用视频①（服务器高质量视频）
             setPreviewVideoUrl(draftData.original_video_url);
-            console.log('[预览] 使用原始视频:', draftData.original_video_url);
+            console.log('[预览] 使用视频①（服务器高质量视频）:', draftData.original_video_url);
           }
 
           // 设置视频ID - 使用 editId 作为唯一标识
-          // 每个编辑草稿对应一个视频，editId 是唯一的
           setVideoId(editId);
 
           // 尝试缓存视频到本地（用于WebCodecs播放）
-          cacheVideoToLocal(editId, draftData.original_video_url);
+          // 优先缓存视频②（如果有），因为预览时播放的是视频②
+          const cacheUrl = clientVideoUrl || draftData.original_video_url;
+          cacheVideoToLocal(editId, cacheUrl);
         }
 
         // 加载ASR结果

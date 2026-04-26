@@ -1,12 +1,17 @@
-\[EditScreen] 步骤2/3: 上传元数据到服务器...
-EditScreen.tsx:329 \[EditScreen] 元数据上传完成: {duration: '0:11', id: 'mat\_1777090160570\_glktrjbsb', is\_local: true, message: '素材元数据已保存（客户端本地渲染）', originalName: 'local\_video.mp4', …}
-EditScreen.tsx:330 \[EditScreen] ====== 客户端渲染上传成功 ======
-21EditScreen.tsx:166 \[Polling] No processing materials to check
+\[EditScreen] ====== 双轨并行上传成功 ======
+EditScreen.tsx:166 \[Polling] No processing materials to check
+EditScreen.tsx:207 \[Immediate Check] Starting for material e82a8a71-1630-4279-bc0d-8a4521a4aa81, task transcode\_e82a8a71-1630-4279-bc0d-8a4521a4aa81
+EditScreen.tsx:166 \[Polling] No processing materials to check
+EditScreen.tsx:214 \[Immediate Check] Status for e82a8a71-1630-4279-bc0d-8a4521a4aa81: completed
+EditScreen.tsx:217 \[Immediate Check] Material e82a8a71-1630-4279-bc0d-8a4521a4aa81 completed!
+14EditScreen.tsx:166 \[Polling] No processing materials to check
 EditScreen.tsx:142 \[WebSocket] Closing connection
 EditScreen.tsx:134 \[WebSocket] Disconnected
 EditScreen.tsx:200 \[Polling] Stopping transcode status polling
-ResultsScreen.tsx:130 \[ResultsScreen] 已缓存视频: 0 个
-ResultsScreen.tsx:130 \[ResultsScreen] 已缓存视频: 0 个
+useClientRendering.ts:62 \[ClientRendering] 客户端渲染已强制开启，跳过设备检测
+ResultsScreen.tsx:145 \[ResultsScreen] 已缓存视频: 0 个
+useClientRendering.ts:62 \[ClientRendering] 客户端渲染已强制开启，跳过设备检测
+ResultsScreen.tsx:145 \[ResultsScreen] 已缓存视频: 0 个
 EditScreen.tsx:100 WebSocket connection to 'ws\://localhost:3002/socket.io/?EIO=4\&transport=websocket' failed: Invalid frame header
 doOpen @ socket\_\_io-client.js?v=b792a26f:1483
 open @ socket\_\_io-client.js?v=b792a26f:953
@@ -42,70 +47,156 @@ performSyncWorkOnRoot @ react-dom\_client.js?v=b792a26f:13517
 flushSyncWorkAcrossRoots\_impl @ react-dom\_client.js?v=b792a26f:13414
 processRootScheduleInMicrotask @ react-dom\_client.js?v=b792a26f:13437
 (anonymous) @ react-dom\_client.js?v=b792a26f:13531
-ResultsScreen.tsx:130 \[ResultsScreen] 已缓存视频: 0 个
-ResultsScreen.tsx:390 \[ResultsScreen] 播放处理，客户端渲染状态: 开启
-ResultsScreen.tsx:324 \[ResultsScreen] ====== 尝试客户端渲染预览 ======
-ResultsScreen.tsx:325 \[ResultsScreen] 组合ID: combo\_ec618317-1ae3-42c3-97d5-4123f85bd93b\_0 素材数: 2
-ResultsScreen.tsx:334 \[ResultsScreen] 从本地存储加载素材...
-ResultsScreen.tsx:336 \[ResultsScreen] 本地素材加载结果: 2 / 2 个
-ResultsScreen.tsx:344 \[ResultsScreen] 开始客户端秒级拼接...
-ResultsScreen.tsx:349 \[ResultsScreen] 拼接进度: 0% - preparing
-ResultsScreen.tsx:349 \[ResultsScreen] 拼接进度: 30% - concatenating
-ResultsScreen.tsx:349 \[ResultsScreen] 拼接进度: 36% - concatenating
-ffmpeg.ts:51 \[FFmpeg] ffmpeg version 5.1.4 Copyright (c) 2000-2023 the FFmpeg developers
-ffmpeg.ts:51 \[FFmpeg] built with emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 3.1.40 (5c27e79dd0a9c4e27ef2326841698cdd4f6b5784)
-ffmpeg.ts:51 \[FFmpeg] configuration: --target-os=none --arch=x86\_32 --enable-cross-compile --disable-asm --disable-stripping --disable-programs --disable-doc --disable-debug --disable-runtime-cpudetect --disable-autodetect --nm=emnm --ar=emar --ranlib=emranlib --cc=emcc --cxx=em++ --objcc=emcc --dep-cc=emcc --extra-cflags='-I/opt/include -O3 -msimd128' --extra-cxxflags='-I/opt/include -O3 -msimd128' --disable-pthreads --disable-w32threads --disable-os2threads --enable-gpl --enable-libx264 --enable-libx265 --enable-libvpx --enable-libmp3lame --enable-libtheora --enable-libvorbis --enable-libopus --enable-zlib --enable-libwebp --enable-libfreetype --enable-libfribidi --enable-libass --enable-libzimg
-ffmpeg.ts:51 \[FFmpeg] libavutil 57. 28.100 / 57. 28.100
-ffmpeg.ts:51 \[FFmpeg] libavcodec 59. 37.100 / 59. 37.100
-ffmpeg.ts:51 \[FFmpeg] libavformat 59. 27.100 / 59. 27.100
-ffmpeg.ts:51 \[FFmpeg] libavdevice 59. 7.100 / 59. 7.100
-ffmpeg.ts:51 \[FFmpeg] libavfilter 8. 44.100 / 8. 44.100
-ffmpeg.ts:51 \[FFmpeg] libswscale 6. 7.100 / 6. 7.100
-ffmpeg.ts:51 \[FFmpeg] libswresample 4. 7.100 / 4. 7.100
-ffmpeg.ts:51 \[FFmpeg] libpostproc 56. 6.100 / 56. 6.100
-ffmpeg.ts:51 \[FFmpeg] \[mov,mp4,m4a,3gp,3g2,mj2 @ 0xdeb330] Auto-inserting h264\_mp4toannexb bitstream filter
-ffmpeg.ts:51 \[FFmpeg] Input #0, concat, from 'list\_1777090187305.txt':
-ffmpeg.ts:51 \[FFmpeg] Duration: N/A, start: 0.000000, bitrate: 2275 kb/s
-ffmpeg.ts:51 \[FFmpeg] Stream #0:0(und): Video: h264 (Constrained Baseline) (avc1 / 0x31637661), yuv420p(tv, bt709, progressive), 1080x1920 \[SAR 1:1 DAR 9:16], 2149 kb/s, 29.92 fps, 30 tbr, 30k tbn
-ffmpeg.ts:51 \[FFmpeg] Metadata:
-ffmpeg.ts:51 \[FFmpeg] handler\_name : VideoHandler
-ffmpeg.ts:51 \[FFmpeg] vendor\_id : \[0]\[0]\[0]\[0]
-ffmpeg.ts:51 \[FFmpeg] encoder : AVC1 Coding
-ffmpeg.ts:51 \[FFmpeg] Stream #0:1(und): Audio: opus (Opus / 0x7375704F), 48000 Hz, stereo, fltp, 126 kb/s
-ffmpeg.ts:51 \[FFmpeg] Metadata:
-ffmpeg.ts:51 \[FFmpeg] handler\_name : SoundHandler
-ffmpeg.ts:51 \[FFmpeg] vendor\_id : \[0]\[0]\[0]\[0]
-ffmpeg.ts:51 \[FFmpeg] \[mp4 @ 0xef9220] track 1: codec frame size is not set
-ffmpeg.ts:51 \[FFmpeg] Output #0, mp4, to 'concat\_1777090187305.mp4':
-ffmpeg.ts:51 \[FFmpeg] Metadata:
-ffmpeg.ts:51 \[FFmpeg] encoder : Lavf59.27.100
-ffmpeg.ts:51 \[FFmpeg] Stream #0:0(und): Video: h264 (Constrained Baseline) (avc1 / 0x31637661), yuv420p(tv, bt709, progressive), 1080x1920 \[SAR 1:1 DAR 9:16], q=2-31, 2149 kb/s, 29.92 fps, 30 tbr, 30k tbn
-ffmpeg.ts:51 \[FFmpeg] Metadata:
-ffmpeg.ts:51 \[FFmpeg] handler\_name : VideoHandler
-ffmpeg.ts:51 \[FFmpeg] vendor\_id : \[0]\[0]\[0]\[0]
-ffmpeg.ts:51 \[FFmpeg] encoder : AVC1 Coding
-ffmpeg.ts:51 \[FFmpeg] Stream #0:1(und): Audio: opus (Opus / 0x7375704F), 48000 Hz, stereo, fltp, 126 kb/s
-ffmpeg.ts:51 \[FFmpeg] Metadata:
-ffmpeg.ts:51 \[FFmpeg] handler\_name : SoundHandler
-ffmpeg.ts:51 \[FFmpeg] vendor\_id : \[0]\[0]\[0]\[0]
-ffmpeg.ts:51 \[FFmpeg] Stream mapping:
-ffmpeg.ts:51 \[FFmpeg] Stream #0:0 -> #0:0 (copy)
-ffmpeg.ts:51 \[FFmpeg] Stream #0:1 -> #0:1 (copy)
-ffmpeg.ts:57 \[FFmpeg] Progress: -3300%
-ffmpeg.ts:51 \[FFmpeg] frame= 1 fps=0.0 q=-1.0 size= 0kB time=00:00:00.00 bitrate=11636.4kbits/s speed=N/A\
-ffmpeg.ts:51 \[FFmpeg] \[mov,mp4,m4a,3gp,3g2,mj2 @ 0xdf27f0] Auto-inserting h264\_mp4toannexb bitstream filter
-ffmpeg.ts:51 \[FFmpeg] \[mp4 @ 0xef9220] Starting second pass: moving the moov atom to the beginning of the file
-ffmpeg.ts:57 \[FFmpeg] Progress: -2193326700%
-ffmpeg.ts:51 \[FFmpeg] frame= 657 fps=0.0 q=-1.0 Lsize= 5964kB time=00:00:21.93 bitrate=2227.7kbits/s speed= 141x\
-ffmpeg.ts:57 \[FFmpeg] Progress: 100%
-ffmpeg.ts:51 \[FFmpeg] video:5609kB audio:337kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: 0.309656%
-ffmpeg.ts:51 \[FFmpeg] Aborted()
-ResultsScreen.tsx:349 \[ResultsScreen] 拼接进度: 78% - concatenating
-ResultsScreen.tsx:349 \[ResultsScreen] 拼接进度: 90% - concatenating
-ResultsScreen.tsx:349 \[ResultsScreen] 拼接进度: 90% - saving
-opfs.ts:157 \[OPFS] Render saved: result\_combo\_ec618317-1ae3-42c3-97d5-4123f85bd93b\_0
-ResultsScreen.tsx:349 \[ResultsScreen] 拼接进度: 100% - completed
-ResultsScreen.tsx:353 \[ResultsScreen] 客户端拼接完成，耗时: 407 ms
-ResultsScreen.tsx:357 \[ResultsScreen] ====== 客户端渲染预览成功 ======
-ResultsScreen.tsx:144 \[缓存] 视频已在本地: combo\_ec618317-1ae3-42c3-97d5-4123f85bd93b\_0
-OptimizedVideoPlayer.tsx:52 \[OptimizedVideoPlayer] 使用本地缓存播放: combo\_ec618317-1ae3-42c3-97d5-4123f85bd93b\_0
+ResultsScreen.tsx:145 \[ResultsScreen] 已缓存视频: 0 个
+ResultsScreen.tsx:451 \[双轨制] ========== 点击预览，双轨并行开始 ==========
+ResultsScreen.tsx:452 \[双轨制] 组合ID: combo\_cb13b04d-dcc0-40e0-ab0c-f7502c4f0b34\_0
+ResultsScreen.tsx:453 \[双轨制] 素材列表: 8e9983c7-6a84-405b-80bb-caace0d85069, e82a8a71-1630-4279-bc0d-8a4521a4aa81
+ResultsScreen.tsx:456 \[双轨制] 🎬 轨道①: 启动服务器FFmpeg拼接+OSS上传（异步）
+ResultsScreen.tsx:383 \[双轨制] ========== 服务器FFmpeg拼接+OSS上传开始 ==========
+ResultsScreen.tsx:384 \[双轨制] 组合ID: combo\_cb13b04d-dcc0-40e0-ab0c-f7502c4f0b34\_0
+ResultsScreen.tsx:385 \[双轨制] 当前状态: server\_video\_url=无
+ResultsScreen.tsx:388 \[双轨制] 调用接口: POST /api/combinations/combo\_cb13b04d-dcc0-40e0-ab0c-f7502c4f0b34\_0/server-render
+ResultsScreen.tsx:460 \[双轨制] 🌐 轨道②: 启动浏览器WebCodecs拼接
+ResultsScreen.tsx:462 \[双轨制] 浏览器WebCodecs状态: ✅ 开启
+ResultsScreen.tsx:465 \[双轨制] 调用 clientRenderPreview\...
+ResultsScreen.tsx:339 \[ResultsScreen] ====== 尝试客户端渲染预览 ======
+ResultsScreen.tsx:340 \[ResultsScreen] 组合ID: combo\_cb13b04d-dcc0-40e0-ab0c-f7502c4f0b34\_0 素材数: 2
+ResultsScreen.tsx:350 \[ResultsScreen] 从本地存储加载素材...
+ResultsScreen.tsx:352 \[ResultsScreen] 本地素材加载结果: 0 / 2 个
+ResultsScreen.tsx:355 \[ResultsScreen] 没有本地素材，降级到服务器渲染
+$RefreshSig$ @ ResultsScreen.tsx:355
+await in $RefreshSig$
+$RefreshSig$ @ ResultsScreen.tsx:466
+$RefreshSig$ @ ResultsScreen.tsx:1037
+executeDispatch @ react-dom\_client.js?v=b792a26f:13622
+runWithFiberInDEV @ react-dom\_client.js?v=b792a26f:997
+processDispatchQueue @ react-dom\_client.js?v=b792a26f:13658
+(anonymous) @ react-dom\_client.js?v=b792a26f:14071
+batchedUpdates$1 @ react-dom\_client.js?v=b792a26f:2626
+dispatchEventForPluginEventSystem @ react-dom\_client.js?v=b792a26f:13763
+dispatchEvent @ react-dom\_client.js?v=b792a26f:16784
+dispatchDiscreteEvent @ react-dom\_client.js?v=b792a26f:16765 <button>
+exports.jsxDEV @ react\_jsx-dev-runtime.js?v=b792a26f:247
+$RefreshSig$ @ ResultsScreen.tsx:1036
+$RefreshSig$ @ ResultsScreen.tsx:989
+react\_stack\_bottom\_frame @ react-dom\_client.js?v=b792a26f:18509
+renderWithHooksAgain @ react-dom\_client.js?v=b792a26f:5729
+renderWithHooks @ react-dom\_client.js?v=b792a26f:5665
+updateFunctionComponent @ react-dom\_client.js?v=b792a26f:7475
+beginWork @ react-dom\_client.js?v=b792a26f:8525
+runWithFiberInDEV @ react-dom\_client.js?v=b792a26f:997
+performUnitOfWork @ react-dom\_client.js?v=b792a26f:12561
+workLoopSync @ react-dom\_client.js?v=b792a26f:12424
+renderRootSync @ react-dom\_client.js?v=b792a26f:12408
+performWorkOnRoot @ react-dom\_client.js?v=b792a26f:11766
+performWorkOnRootViaSchedulerTask @ react-dom\_client.js?v=b792a26f:13505
+performWorkUntilDeadline @ react-dom\_client.js?v=b792a26f:36 <ResultsScreen>
+exports.jsxDEV @ react\_jsx-dev-runtime.js?v=b792a26f:247
+AppContent @ App.tsx:306
+react\_stack\_bottom\_frame @ react-dom\_client.js?v=b792a26f:18509
+renderWithHooksAgain @ react-dom\_client.js?v=b792a26f:5729
+renderWithHooks @ react-dom\_client.js?v=b792a26f:5665
+updateFunctionComponent @ react-dom\_client.js?v=b792a26f:7475
+beginWork @ react-dom\_client.js?v=b792a26f:8525
+runWithFiberInDEV @ react-dom\_client.js?v=b792a26f:997
+performUnitOfWork @ react-dom\_client.js?v=b792a26f:12561
+workLoopSync @ react-dom\_client.js?v=b792a26f:12424
+renderRootSync @ react-dom\_client.js?v=b792a26f:12408
+performWorkOnRoot @ react-dom\_client.js?v=b792a26f:11766
+performWorkOnRootViaSchedulerTask @ react-dom\_client.js?v=b792a26f:13505
+performWorkUntilDeadline @ react-dom\_client.js?v=b792a26f:36
+ResultsScreen.tsx:467 \[双轨制] clientRenderPreview 返回: ❌ 失败
+ResultsScreen.tsx:477 \[双轨制] ⚠️ 轨道②失败，降级到本地FFmpeg拼接...
+ResultsScreen.tsx:390 POST <http://localhost:3002/api/combinations/combo_cb13b04d-dcc0-40e0-ab0c-f7502c4f0b34_0/server-render> 500 (INTERNAL SERVER ERROR)
+$RefreshSig$ @ ResultsScreen.tsx:390
+$RefreshSig$ @ ResultsScreen.tsx:457
+$RefreshSig$ @ ResultsScreen.tsx:1037
+executeDispatch @ react-dom\_client.js?v=b792a26f:13622
+runWithFiberInDEV @ react-dom\_client.js?v=b792a26f:997
+processDispatchQueue @ react-dom\_client.js?v=b792a26f:13658
+(anonymous) @ react-dom\_client.js?v=b792a26f:14071
+batchedUpdates$1 @ react-dom\_client.js?v=b792a26f:2626
+dispatchEventForPluginEventSystem @ react-dom\_client.js?v=b792a26f:13763
+dispatchEvent @ react-dom\_client.js?v=b792a26f:16784
+dispatchDiscreteEvent @ react-dom\_client.js?v=b792a26f:16765 <button>
+exports.jsxDEV @ react\_jsx-dev-runtime.js?v=b792a26f:247
+$RefreshSig$ @ ResultsScreen.tsx:1036
+$RefreshSig$ @ ResultsScreen.tsx:989
+react\_stack\_bottom\_frame @ react-dom\_client.js?v=b792a26f:18509
+renderWithHooksAgain @ react-dom\_client.js?v=b792a26f:5729
+renderWithHooks @ react-dom\_client.js?v=b792a26f:5665
+updateFunctionComponent @ react-dom\_client.js?v=b792a26f:7475
+beginWork @ react-dom\_client.js?v=b792a26f:8525
+runWithFiberInDEV @ react-dom\_client.js?v=b792a26f:997
+performUnitOfWork @ react-dom\_client.js?v=b792a26f:12561
+workLoopSync @ react-dom\_client.js?v=b792a26f:12424
+renderRootSync @ react-dom\_client.js?v=b792a26f:12408
+performWorkOnRoot @ react-dom\_client.js?v=b792a26f:11766
+performWorkOnRootViaSchedulerTask @ react-dom\_client.js?v=b792a26f:13505
+performWorkUntilDeadline @ react-dom\_client.js?v=b792a26f:36 <ResultsScreen>
+exports.jsxDEV @ react\_jsx-dev-runtime.js?v=b792a26f:247
+AppContent @ App.tsx:306
+react\_stack\_bottom\_frame @ react-dom\_client.js?v=b792a26f:18509
+renderWithHooksAgain @ react-dom\_client.js?v=b792a26f:5729
+renderWithHooks @ react-dom\_client.js?v=b792a26f:5665
+updateFunctionComponent @ react-dom\_client.js?v=b792a26f:7475
+beginWork @ react-dom\_client.js?v=b792a26f:8525
+runWithFiberInDEV @ react-dom\_client.js?v=b792a26f:997
+performUnitOfWork @ react-dom\_client.js?v=b792a26f:12561
+workLoopSync @ react-dom\_client.js?v=b792a26f:12424
+renderRootSync @ react-dom\_client.js?v=b792a26f:12408
+performWorkOnRoot @ react-dom\_client.js?v=b792a26f:11766
+performWorkOnRootViaSchedulerTask @ react-dom\_client.js?v=b792a26f:13505
+performWorkUntilDeadline @ react-dom\_client.js?v=b792a26f:36
+ResultsScreen.tsx:395 \[双轨制] 后端响应状态码: 500
+ResultsScreen.tsx:398 \[双轨制] 后端响应数据: {
+"error": "name 'subprocess' is not defined"
+}
+ResultsScreen.tsx:411 \[双轨制] ❌ 服务器FFmpeg拼接+OSS上传失败: name 'subprocess' is not defined
+$RefreshSig$ @ ResultsScreen.tsx:411
+await in $RefreshSig$
+$RefreshSig$ @ ResultsScreen.tsx:457
+$RefreshSig$ @ ResultsScreen.tsx:1037
+executeDispatch @ react-dom\_client.js?v=b792a26f:13622
+runWithFiberInDEV @ react-dom\_client.js?v=b792a26f:997
+processDispatchQueue @ react-dom\_client.js?v=b792a26f:13658
+(anonymous) @ react-dom\_client.js?v=b792a26f:14071
+batchedUpdates$1 @ react-dom\_client.js?v=b792a26f:2626
+dispatchEventForPluginEventSystem @ react-dom\_client.js?v=b792a26f:13763
+dispatchEvent @ react-dom\_client.js?v=b792a26f:16784
+dispatchDiscreteEvent @ react-dom\_client.js?v=b792a26f:16765 <button>
+exports.jsxDEV @ react\_jsx-dev-runtime.js?v=b792a26f:247
+$RefreshSig$ @ ResultsScreen.tsx:1036
+$RefreshSig$ @ ResultsScreen.tsx:989
+react\_stack\_bottom\_frame @ react-dom\_client.js?v=b792a26f:18509
+renderWithHooksAgain @ react-dom\_client.js?v=b792a26f:5729
+renderWithHooks @ react-dom\_client.js?v=b792a26f:5665
+updateFunctionComponent @ react-dom\_client.js?v=b792a26f:7475
+beginWork @ react-dom\_client.js?v=b792a26f:8525
+runWithFiberInDEV @ react-dom\_client.js?v=b792a26f:997
+performUnitOfWork @ react-dom\_client.js?v=b792a26f:12561
+workLoopSync @ react-dom\_client.js?v=b792a26f:12424
+renderRootSync @ react-dom\_client.js?v=b792a26f:12408
+performWorkOnRoot @ react-dom\_client.js?v=b792a26f:11766
+performWorkOnRootViaSchedulerTask @ react-dom\_client.js?v=b792a26f:13505
+performWorkUntilDeadline @ react-dom\_client.js?v=b792a26f:36 <ResultsScreen>
+exports.jsxDEV @ react\_jsx-dev-runtime.js?v=b792a26f:247
+AppContent @ App.tsx:306
+react\_stack\_bottom\_frame @ react-dom\_client.js?v=b792a26f:18509
+renderWithHooksAgain @ react-dom\_client.js?v=b792a26f:5729
+renderWithHooks @ react-dom\_client.js?v=b792a26f:5665
+updateFunctionComponent @ react-dom\_client.js?v=b792a26f:7475
+beginWork @ react-dom\_client.js?v=b792a26f:8525
+runWithFiberInDEV @ react-dom\_client.js?v=b792a26f:997
+performUnitOfWork @ react-dom\_client.js?v=b792a26f:12561
+workLoopSync @ react-dom\_client.js?v=b792a26f:12424
+renderRootSync @ react-dom\_client.js?v=b792a26f:12408
+performWorkOnRoot @ react-dom\_client.js?v=b792a26f:11766
+performWorkOnRootViaSchedulerTask @ react-dom\_client.js?v=b792a26f:13505
+performWorkUntilDeadline @ react-dom\_client.js?v=b792a26f:36
+ResultsScreen.tsx:419 \[双轨制] ========== 服务器FFmpeg拼接+OSS上传结束 ==========
+ResultsScreen.tsx:479 \[双轨制] 本地FFmpeg降级拼接: ✅ 成功
+ResultsScreen.tsx:482 \[双轨制] ========== 双轨并行结束 ==========
+ResultsScreen.tsx:159 \[缓存] 视频已在本地: combo\_cb13b04d-dcc0-40e0-ab0c-f7502c4f0b34\_0
+OptimizedVideoPlayer.tsx:62 \[OptimizedVideoPlayer] 使用本地缓存播放: combo\_cb13b04d-dcc0-40e0-ab0c-f7502c4f0b34\_0
+favicon.ico:1 GET <http://localhost:3000/favicon.ico> 404 (Not Found)

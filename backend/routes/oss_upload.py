@@ -32,6 +32,7 @@ def get_sts_token():
     请求参数：
     - dir: 上传目录前缀（如 'users/{user_id}/renders/'）
     - expire_seconds: 签名过期时间（默认300秒）
+    - bucket: 指定bucket（默认使用配置中的bucket，可选'mixcut'使用杭州bucket）
     
     返回：
     - accessid: AccessKey ID
@@ -46,9 +47,16 @@ def get_sts_token():
         user_id = data.get('user_id', 'anonymous')
         dir_prefix = data.get('dir', f"users/{user_id}/client-renders/")
         expire_seconds = data.get('expire_seconds', 300)
+        bucket_name = data.get('bucket', oss_client.bucket_name)
         
         if not oss_client.enabled:
             return jsonify({'error': 'OSS未启用'}), 503
+        
+        # 根据bucket确定endpoint
+        if bucket_name == 'mixcut':
+            endpoint = 'oss-cn-hangzhou.aliyuncs.com'
+        else:
+            endpoint = oss_client.endpoint
         
         # 生成过期时间
         expire = int(time.time()) + expire_seconds
@@ -57,7 +65,7 @@ def get_sts_token():
         policy_dict = {
             'expiration': get_iso_8601(expire),
             'conditions': [
-                {'bucket': oss_client.bucket_name},
+                {'bucket': bucket_name},
                 ['content-length-range', 0, 2048 * 1024 * 1024],  # 最大2GB
                 ['starts-with', '$key', dir_prefix]
             ]
@@ -76,7 +84,7 @@ def get_sts_token():
         ).decode()
         
         # 构建host
-        host = f"https://{oss_client.bucket_name}.{oss_client.endpoint}"
+        host = f"https://{bucket_name}.{endpoint}"
         
         return jsonify({
             'accessid': oss_client.access_key_id,

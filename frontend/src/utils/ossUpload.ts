@@ -21,6 +21,7 @@ export interface UploadResult {
 
 /**
  * 获取OSS STS临时签名
+ * 使用杭州地域的mixcut bucket（用于ICE转码）
  */
 export async function getSTSToken(userId: string): Promise<STSToken> {
   const response = await fetch(`${API_BASE_URL}/api/oss/sts-token`, {
@@ -30,6 +31,7 @@ export async function getSTSToken(userId: string): Promise<STSToken> {
       user_id: userId,
       dir: `users/${userId}/client-renders/`,
       expire_seconds: 300,
+      bucket: 'mixcut', // 使用杭州地域的bucket
     }),
   });
 

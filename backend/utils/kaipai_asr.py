@@ -421,12 +421,26 @@ def extract_and_upload_audio(video_url: str, edit_id: str) -> str:
         
         # 下载视频到本地
         local_video_path = os.path.join('uploads', f'temp_audio_extract_{edit_id}_{timestamp}.mp4')
-        if video_url.startswith('http'):
+        
+        # 检查URL类型
+        if video_url.startswith('blob:'):
+            # blob URL是浏览器本地资源，后端无法直接访问
+            # 需要从KaipaiEdit获取原始视频URL（应该是OSS URL或本地路径）
+            logger.error(f"❌ 收到blob URL，后端无法访问浏览器本地资源: {video_url[:50]}...")
+            logger.error(f"❌ 请检查前端是否传入了正确的视频URL（应该是OSS URL或本地文件路径）")
+            return video_url  # 返回原URL，让调用方处理错误
+        elif video_url.startswith('http'):
+            # 正常的HTTP URL（OSS URL或本地服务URL）
+            logger.info(f"📥 从URL下载视频: {video_url[:80]}...")
             response = requests.get(video_url, timeout=120)
+            logger.info(f"📥 下载完成，大小: {len(response.content)} bytes")
             with open(local_video_path, 'wb') as f:
                 f.write(response.content)
+            logger.info(f"💾 视频保存到: {local_video_path}")
         else:
+            # 本地文件路径
             local_video_path = video_url.lstrip('/')
+            logger.info(f"📁 使用本地视频: {local_video_path}")
         
         # 提取音频并重新编码
         audio_path = os.path.join('uploads', f'audio_{edit_id}_{timestamp}.mp3')
@@ -441,37 +455,47 @@ def extract_and_upload_audio(video_url: str, edit_id: str) -> str:
             audio_path
         ]
         
+        logger.info(f"🔧 提取音频: ffmpeg {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            logger.error(f"提取音频失败: {result.stderr}")
+            logger.error(f"❌ 提取音频失败: {result.stderr}")
             return video_url  # 失败时返回原视频URL
+        
+        logger.info(f"✅ 音频提取完成: {audio_path}")
         
         # 上传到OSS
         if oss_client.enabled:
             oss_key = f"kaipai/audio_{edit_id}.mp3"
+            logger.info(f"☁️ 上传到OSS: {oss_key}")
             oss_client.bucket.put_object_from_file(oss_key, audio_path)
             audio_url = f"https://{oss_client.bucket_name}.{oss_client.endpoint}/{oss_key}"
+            logger.info(f"✅ OSS上传完成: {audio_url[:80]}...")
         else:
             # 使用带时间戳的文件名
             audio_url = f"/uploads/audio_{edit_id}_{timestamp}.mp3"
+            logger.info(f"📁 使用本地音频路径: {audio_url}")
         
         # 清理临时文件
         if os.path.exists(local_video_path) and 'temp_' in local_video_path:
             try:
                 os.remove(local_video_path)
+                logger.info(f"🗑️ 清理临时视频: {local_video_path}")
             except Exception as e:
-                logger.warning(f"清理临时视频文件失败: {e}")
+                logger.warning(f"⚠️ 清理临时视频文件失败: {e}")
         if os.path.exists(audio_path):
             try:
                 os.remove(audio_path)
+                logger.info(f"🗑️ 清理临时音频: {audio_path}")
             except Exception as e:
-                logger.warning(f"清理临时音频文件失败: {e}")
+                logger.warning(f"⚠️ 清理临时音频文件失败: {e}")
         
-        logger.info(f"音频提取完成: {audio_url}")
+        logger.info(f"✅ 音频提取全部完成: {audio_url}")
         return audio_url
         
     except Exception as e:
-        logger.error(f"提取音频失败: {e}")
+        logger.error(f"❌ 提取音频失败: {e}")
+        import traceback
+        traceback.print_exc()
         return video_url  # 失败时返回原视频URL
 
 

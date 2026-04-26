@@ -43,11 +43,12 @@ export interface UseClientRenderingReturn {
 }
 
 export function useClientRendering(): UseClientRenderingReturn {
+  // 强制开启客户端渲染，跳过设备检测
   const [state, setState] = useState<ClientRenderingState>({
     capability: null,
-    isEnabled: true, // 默认开启客户端渲染
-    isForced: false,
-    isLoading: true,
+    isEnabled: true, // 强制开启
+    isForced: true,
+    isLoading: false, // 跳过检测
     error: null,
   });
 
@@ -56,48 +57,9 @@ export function useClientRendering(): UseClientRenderingReturn {
   
   const isMounted = useRef(true);
 
-  // 检测设备能力
+  // 设备检测已禁用，强制开启客户端渲染
   useEffect(() => {
-    const detect = async () => {
-      try {
-        const capability = await detectDeviceCapability();
-        if (isMounted.current) {
-          const canUse = capability.canUseClientRendering;
-          console.log('[ClientRendering] 设备能力检测完成:', {
-            canUseClientRendering: canUse,
-            performanceLevel: capability.performanceLevel,
-            memoryGB: capability.memoryGB,
-            cpuCores: capability.cpuCores,
-            isMobile: capability.isMobile,
-            supportsFFmpeg: capability.supportsFFmpeg,
-            supportsOPFS: capability.supportsOPFS,
-            unsupportedReasons: capability.unsupportedReasons,
-          });
-          setState(prev => ({
-            ...prev,
-            capability,
-            // 默认开启，但如果设备完全不支持则关闭
-            isEnabled: canUse,
-            isLoading: false,
-          }));
-        }
-      } catch (err) {
-        console.error('[ClientRendering] 设备检测失败:', err);
-        if (isMounted.current) {
-          setState(prev => ({
-            ...prev,
-            isLoading: false,
-            error: '设备检测失败',
-          }));
-        }
-      }
-    };
-
-    detect();
-
-    return () => {
-      isMounted.current = false;
-    };
+    console.log('[ClientRendering] 客户端渲染已强制开启，跳过设备检测');
   }, []);
 
   // 启用客户端渲染

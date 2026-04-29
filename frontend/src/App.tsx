@@ -360,7 +360,7 @@ function AppContent() {
           <User size={24} className={mainTab === 'profile' ? 'fill-blue-100' : ''} />
           <span className="text-[10px] font-medium">我的</span>
         </button>
-        <button 
+        {/* <button 
           onClick={() => setMainTab('test')}
           className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'test' ? 'text-red-600' : 'text-gray-400'}`}
         >
@@ -377,7 +377,7 @@ function AppContent() {
             ASR
           </div>
           <span className="text-[10px] font-medium">ASR</span>
-        </button>
+        </button> */}
       </div>
     </div>
   );

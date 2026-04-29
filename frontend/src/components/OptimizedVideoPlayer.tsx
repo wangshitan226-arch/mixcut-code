@@ -17,6 +17,7 @@ interface OptimizedVideoPlayerProps {
  * 2. 智能缓冲策略
  * 3. 网络自适应码率
  * 4. 断点续播支持
+ * 5. 视频URL变化时自动重新加载
  */
 export default function OptimizedVideoPlayer({
   itemId,
@@ -31,10 +32,25 @@ export default function OptimizedVideoPlayer({
   const [error, setError] = useState<string | null>(null);
   const [bufferedPercent, setBufferedPercent] = useState(0);
   const objectUrlRef = useRef<string | null>(null);
+  const prevVideoUrlRef = useRef<string>(videoUrl);
 
   // 确定最终使用的视频源
   // 优先级：1.传入的Blob URL > 2.本地缓存 > 3.传入的其他URL
   const finalSrc = localUrl || (videoUrl.startsWith('http') || videoUrl.startsWith('blob:') ? videoUrl : `${apiBaseUrl}${videoUrl}`);
+
+  // 统一的缓存检查逻辑
+  const checkIsActuallyCached = useCallback(async (): Promise<boolean> => {
+    // Blob URL 视为已缓存
+    if (videoUrl.startsWith('blob:')) return true;
+    // 检查本地缓存状态
+    if (isCached) return true;
+    // 额外检查 IndexedDB
+    try {
+      return await hasVideoInLocal(itemId);
+    } catch {
+      return false;
+    }
+  }, [videoUrl, isCached, itemId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -42,28 +58,41 @@ export default function OptimizedVideoPlayer({
     const loadVideo = async () => {
       if (!isMounted) return;
 
+      setIsLoading(true);
+      setError(null);
+
       try {
         // 如果传入的是Blob URL（客户端渲染结果），直接使用，不加载缓存
         if (videoUrl.startsWith('blob:')) {
           console.log('[OptimizedVideoPlayer] 使用客户端渲染的Blob URL:', itemId);
           if (isMounted) {
+            setLocalUrl(null); // 清除本地缓存URL，使用传入的Blob URL
             setIsLoading(false);
           }
           return;
         }
 
         // 优先尝试从本地缓存加载（仅非Blob URL时）
-        if (isCached) {
+        const actuallyCached = await checkIsActuallyCached();
+        if (actuallyCached) {
           const file = await getVideo(itemId);
           if (file && isMounted) {
+            // 释放旧的 Object URL
+            if (objectUrlRef.current) {
+              URL.revokeObjectURL(objectUrlRef.current);
+            }
             const url = URL.createObjectURL(file);
             objectUrlRef.current = url;
             setLocalUrl(url);
             console.log('[OptimizedVideoPlayer] 使用本地缓存播放:', itemId);
           }
+        } else {
+          // 没有缓存，直接使用传入的URL
+          setLocalUrl(null);
         }
       } catch (err) {
         console.error('[OptimizedVideoPlayer] 加载本地视频失败:', err);
+        setLocalUrl(null);
       } finally {
         if (isMounted) {
           setIsLoading(false);
@@ -80,7 +109,17 @@ export default function OptimizedVideoPlayer({
         objectUrlRef.current = null;
       }
     };
-  }, [itemId, isCached, videoUrl]);
+  }, [itemId, videoUrl, checkIsActuallyCached]);
+
+  // 当 videoUrl 变化时，重新加载视频
+  useEffect(() => {
+    if (prevVideoUrlRef.current !== videoUrl && videoRef.current) {
+      console.log('[OptimizedVideoPlayer] videoUrl 变化，重新加载:', itemId);
+      videoRef.current.src = finalSrc;
+      videoRef.current.load();
+      prevVideoUrlRef.current = videoUrl;
+    }
+  }, [videoUrl, finalSrc, itemId]);
 
   // 监听缓冲进度
   const handleProgress = useCallback(() => {

@@ -34,7 +34,6 @@ RENDER_MAX_AGE_HOURS = 24
 OSS_CONFIG = {
     # 阿里云OSS配置
     # 从环境变量读取敏感信息
-
     #'access_key_id': os.environ.get('OSS_ACCESS_KEY_ID', ''),
     #'access_key_secret': os.environ.get('OSS_ACCESS_KEY_SECRET', ''),
     'endpoint': 'oss-cn-hangzhou.aliyuncs.com',  # 华东1(杭州)

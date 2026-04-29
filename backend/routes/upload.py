@@ -213,7 +213,7 @@ def get_transcode_status(task_id):
             'progress': task.get('progress', 0)
         })
     
-    # 内存中没有，检查数据库（任务可能已完成并被清理）
+    # 内存中没有，检查数据库（任务可能已完成或被清理）
     material_id = task_id.replace('transcode_', '')
     material = Material.query.get(material_id)
     if material and material.unified_path and os.path.exists(material.unified_path):
@@ -224,6 +224,62 @@ def get_transcode_status(task_id):
         })
     
     return jsonify({'error': '任务不存在'}), 404
+
+
+@upload_bp.route('/transcode/<task_id>/retry', methods=['POST'])
+def retry_transcode(task_id):
+    """
+    重试转码任务
+    
+    当转码失败时，可以调用此接口重新启动转码
+    """
+    try:
+        print(f'[Retry Transcode] 收到重试请求: {task_id}')
+        
+        # 从task_id获取material_id
+        material_id = task_id.replace('transcode_', '')
+        material = Material.query.get(material_id)
+        
+        if not material:
+            return jsonify({'error': '素材不存在'}), 404
+        
+        # 检查原始文件是否存在
+        if not os.path.exists(material.file_path):
+            return jsonify({'error': '原始文件不存在，无法重试'}), 400
+        
+        # 清除之前的失败状态
+        if task_id in transcode_tasks:
+            del transcode_tasks[task_id]
+        
+        # 清除unified_path（如果存在但文件不存在）
+        if material.unified_path and not os.path.exists(material.unified_path):
+            material.unified_path = None
+            db.session.commit()
+        
+        # 设置新的unified_path
+        unified_filename = f"{material_id}_unified.mp4"
+        unified_path = os.path.join(UNIFIED_FOLDER, unified_filename)
+        
+        # 启动新的转码任务
+        app = current_app._get_current_object()
+        thread = threading.Thread(
+            target=async_transcode_task,
+            args=(task_id, material_id, material.file_path, unified_path, 'medium', app, material.user_id)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        print(f'[Retry Transcode] 转码任务已重新启动: {task_id}')
+        
+        return jsonify({
+            'task_id': task_id,
+            'status': 'processing',
+            'message': '转码任务已重新启动'
+        })
+        
+    except Exception as e:
+        print(f'[Retry Transcode] 重试失败: {e}')
+        return jsonify({'error': str(e)}), 500
 
 
 @upload_bp.route('/materials/<material_id>/download', methods=['GET'])

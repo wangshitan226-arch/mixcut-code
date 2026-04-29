@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { ChevronLeft, Mic, Trash2, Plus, Film, Image as ImageIcon, Loader2, Cpu } from 'lucide-react';
+import { ChevronLeft, Mic, Trash2, Plus, Film, Image as ImageIcon, Loader2, Cpu, AlertCircle, CheckCircle2, RefreshCw } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { useClientRendering } from '../hooks/useClientRendering';
 import { processMaterial, ProcessedMaterial } from '../utils/clientMaterialProcessor';
@@ -9,6 +9,19 @@ import { isIndexedDBSupported } from '../utils/indexedDB';
 const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
 const WS_BASE_URL = API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
 const POLLING_INTERVAL = 200; // 200ms轮询间隔，作为WebSocket的fallback
+
+// 上传队列项（单镜头多文件上传）
+interface UploadQueueItem {
+  id: string;              // 任务ID
+  shotId: number;          // 所属镜头ID
+  file: File;              // 文件
+  fileName: string;        // 文件名
+  status: 'pending' | 'uploading' | 'completed' | 'failed';
+  progress: number;        // 0-100
+  error?: string;          // 错误信息
+  materialId?: string;     // 上传成功后返回的素材ID
+  transcodeTaskId?: string; // 转码任务ID
+}
 
 interface Material {
   id: string;
@@ -62,18 +75,38 @@ export default function EditScreen({
   selectedQuality,
   onQualityChange
 }: EditScreenProps) {
-  const [uploading, setUploading] = useState<{ shotId: number | null; progress: number }>({ shotId: null, progress: 0 });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeShotId, setActiveShotId] = useState<number | null>(null);
+  
+  // 上传队列（单镜头多文件上传）
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
+  const [isProcessingQueue, setIsProcessingQueue] = useState(false);
+  const [currentShotId, setCurrentShotId] = useState<number | null>(null);
+  
+  // 转码任务管理
   const [transcodingMaterials, setTranscodingMaterials] = useState<Set<string>>(new Set());
+  const [transcodeFailedMaterials, setTranscodeFailedMaterials] = useState<Set<string>>(new Set());
+  const [transcodeProgressMap, setTranscodeProgressMap] = useState<Map<string, number>>(new Map());
+  const [showTranscodePanel, setShowTranscodePanel] = useState(false);
 
   // 客户端渲染状态
   const { state: clientRenderState, enable: enableClientRender, disable: disableClientRender, forceEnable: forceEnableClientRender } = useClientRendering();
+
+  // 使用 ref 来避免循环依赖问题（必须在 clientRenderState 初始化之后定义）
+  const uploadQueueRef = useRef(uploadQueue);
+  uploadQueueRef.current = uploadQueue;
+  const isProcessingQueueRef = useRef(isProcessingQueue);
+  isProcessingQueueRef.current = isProcessingQueue;
+  const currentShotIdRef = useRef(currentShotId);
+  currentShotIdRef.current = currentShotId;
+  const clientRenderStateRef = useRef(clientRenderState);
+  clientRenderStateRef.current = clientRenderState;
   const [clientProcessedMaterials, setClientProcessedMaterials] = useState<Map<string, ProcessedMaterial>>(new Map());
   const [showClientRenderPanel, setShowClientRenderPanel] = useState(false);
   
   // WebSocket连接
   const socketRef = useRef<Socket | null>(null);
+  const [wsStatus, setWsStatus] = useState<'connected' | 'disconnected' | 'connecting'>('connecting');
   
   // Use ref to access latest shots without triggering effect recreation
   const shotsRef = useRef(shots);
@@ -83,14 +116,35 @@ export default function EditScreen({
   const onRefreshRef = useRef(onRefresh);
   onRefreshRef.current = onRefresh;
 
-  // Check if any material is transcoding
+  // Check if any material is transcoding or uploading
   const hasTranscodingMaterials = React.useMemo(() => {
-    return shots.some(shot => 
+    // 检查是否有任何文件正在上传或等待
+    const isUploading = uploadQueue.some(item => item.status === 'pending' || item.status === 'uploading');
+    
+    // 检查是否有素材正在转码
+    const isTranscoding = shots.some(shot => 
       shot.materials.some(mat => 
         mat.transcode_status === 'processing' || transcodingMaterials.has(mat.id)
       )
     );
-  }, [shots, transcodingMaterials]);
+    
+    return isUploading || isTranscoding;
+  }, [shots, transcodingMaterials, uploadQueue]);
+  
+  // 计算当前上传的项
+  const currentUploadItem = React.useMemo(() => {
+    return uploadQueue.find(item => item.status === 'uploading');
+  }, [uploadQueue]);
+  
+  // 计算等待中的项数
+  const pendingCount = React.useMemo(() => {
+    return uploadQueue.filter(item => item.status === 'pending').length;
+  }, [uploadQueue]);
+  
+  // 检查是否有活跃的上传任务
+  const hasActiveUploads = React.useMemo(() => {
+    return uploadQueue.some(item => item.status === 'pending' || item.status === 'uploading');
+  }, [uploadQueue]);
 
   // WebSocket连接 - 零延迟接收转码完成通知
   useEffect(() => {
@@ -107,6 +161,7 @@ export default function EditScreen({
     
     socket.on('connect', () => {
       console.log('[WebSocket] Connected:', socket.id);
+      setWsStatus('connected');
       // 注册当前用户，接收该用户的转码通知
       socket.emit('register', { user_id: userId });
     });
@@ -132,6 +187,12 @@ export default function EditScreen({
     
     socket.on('disconnect', () => {
       console.log('[WebSocket] Disconnected');
+      setWsStatus('disconnected');
+    });
+    
+    socket.on('connect_error', (error) => {
+      console.error('[WebSocket] Connection error:', error);
+      setWsStatus('disconnected');
     });
     
     socket.on('error', (error) => {
@@ -175,7 +236,12 @@ export default function EditScreen({
           const response = await fetch(`${API_BASE_URL}/api/transcode/${mat.transcode_task_id}/status`);
           if (response.ok) {
             const data = await response.json();
-            console.log(`[Polling] Status for ${mat.id}: ${data.status}`);
+            console.log(`[Polling] Status for ${mat.id}: ${data.status}, progress: ${data.progress}%`);
+            
+            // 更新进度
+            if (data.progress !== undefined) {
+              setTranscodeProgressMap(prev => new Map(prev).set(mat.id, data.progress));
+            }
             
             if (data.status === 'completed') {
               console.log(`[Polling] Material ${mat.id} completed!`);
@@ -184,10 +250,30 @@ export default function EditScreen({
                 newSet.delete(mat.id);
                 return newSet;
               });
+              setTranscodeFailedMaterials(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(mat.id);
+                return newSet;
+              });
               // 立即刷新获取最新状态
               onRefreshRef.current();
             } else if (data.status === 'processing') {
               setTranscodingMaterials(prev => new Set(prev).add(mat.id));
+              setTranscodeFailedMaterials(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(mat.id);
+                return newSet;
+              });
+            } else if (data.status === 'failed') {
+              console.log(`[Polling] Material ${mat.id} failed!`);
+              setTranscodingMaterials(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(mat.id);
+                return newSet;
+              });
+              setTranscodeFailedMaterials(prev => new Set(prev).add(mat.id));
+              // 立即刷新获取最新状态
+              onRefreshRef.current();
             }
           }
         } catch (error) {
@@ -220,6 +306,11 @@ export default function EditScreen({
               newSet.delete(materialId);
               return newSet;
             });
+            setTranscodeFailedMaterials(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(materialId);
+              return newSet;
+            });
             // 立即刷新获取最新状态
             onRefreshRef.current();
             return true;
@@ -230,6 +321,9 @@ export default function EditScreen({
               newSet.delete(materialId);
               return newSet;
             });
+            setTranscodeFailedMaterials(prev => new Set(prev).add(materialId));
+            // 立即刷新获取最新状态
+            onRefreshRef.current();
             return true;
           }
         }
@@ -268,10 +362,22 @@ export default function EditScreen({
   // 客户端渲染模式：双轨并行制
   // 轨道1: 浏览器 WebCodecs 本地转码 (视频② - 用于预览)
   // 轨道2: 服务器 FFmpeg 转码 (视频① - 用于ASR和导出)
-  const handleClientSideUpload = async (file: File, shotId: number) => {
-    setUploading({ shotId, progress: 0 });
+  const handleClientSideUpload = async (file: File, shotId: number, uploadItemId: string): Promise<any> => {
     console.log('[EditScreen] ====== 开始双轨并行上传 ======');
     console.log('[EditScreen] 文件名:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
+
+    // 双轨进度跟踪
+    let browserTrackProgress = 0;
+    let serverTrackProgress = 0;
+    
+    const updateCombinedProgress = () => {
+      // 浏览器轨道占50%，服务器轨道占50%
+      const combinedProgress = Math.round((browserTrackProgress * 0.5) + (serverTrackProgress * 0.5));
+      // 更新队列中的进度
+      setUploadQueue(prev => prev.map(item => 
+        item.id === uploadItemId ? { ...item, progress: combinedProgress } : item
+      ));
+    };
 
     try {
       // 生成素材ID（确保前后端一致）
@@ -281,13 +387,14 @@ export default function EditScreen({
       // ========== 双轨并行处理 ==========
       console.log('[EditScreen] 启动双轨并行处理...');
 
-      // 轨道1: 浏览器 WebCodecs 本地转码 (0-40% 进度)
+      // 轨道1: 浏览器 WebCodecs 本地转码 (0-100% 进度，最终占50%)
       const browserTrackPromise = processMaterial(file, {
         quality: clientRenderState.capability?.recommendedQuality || 'medium',
         generateThumbnail: true,
         materialId,
         onProgress: (progress, stage) => {
-          setUploading({ shotId, progress: Math.round(progress * 0.4) });
+          browserTrackProgress = progress;
+          updateCombinedProgress();
         },
       }).then(processed => {
         console.log('[EditScreen] 轨道1完成(浏览器转码):', processed.id);
@@ -295,7 +402,7 @@ export default function EditScreen({
         return processed;
       });
 
-      // 轨道2: 服务器上传 + FFmpeg 转码 (0-50% 进度)
+      // 轨道2: 服务器上传 + FFmpeg 转码 (0-100% 进度，最终占50%)
       const serverTrackPromise = (async () => {
         const formData = new FormData();
         formData.append('file', file);
@@ -310,12 +417,10 @@ export default function EditScreen({
 
           xhr.upload.addEventListener('progress', (e) => {
             if (e.lengthComputable) {
-              const uploadProgress = Math.round((e.loaded / e.total) * 50);
-              // 更新进度，但不超过当前显示值（避免和浏览器轨道冲突）
-              setUploading(prev => ({
-                shotId,
-                progress: Math.max(prev.progress, uploadProgress)
-              }));
+              // 上传阶段占服务器轨道的50%
+              const uploadRatio = e.loaded / e.total;
+              serverTrackProgress = Math.round(uploadRatio * 50);
+              updateCombinedProgress();
             }
           });
 
@@ -323,6 +428,9 @@ export default function EditScreen({
             if (xhr.status === 200) {
               const result = JSON.parse(xhr.responseText);
               console.log('[EditScreen] 轨道2完成(服务器上传):', result.id);
+              // 上传完成，服务器轨道显示50%，等待转码完成
+              serverTrackProgress = 50;
+              updateCombinedProgress();
               resolve(result);
             } else {
               reject(new Error('服务器上传失败'));
@@ -351,33 +459,33 @@ export default function EditScreen({
       if (serverResult.transcode_task_id) {
         console.log('[EditScreen] 服务器转码任务:', serverResult.transcode_task_id);
         setTranscodingMaterials(prev => new Set(prev).add(serverResult.id));
+        // 上传完成但转码未完成，服务器轨道保持50%
+        serverTrackProgress = 50;
+        updateCombinedProgress();
         setTimeout(() => {
           checkTranscodeStatusImmediately(serverResult.transcode_task_id, serverResult.id);
         }, 100);
+      } else {
+        // 没有转码任务，服务器轨道完成
+        serverTrackProgress = 100;
+        updateCombinedProgress();
       }
 
-      setUploading({ shotId, progress: 100 });
       console.log('[EditScreen] ====== 双轨并行上传成功 ======');
 
       // 刷新镜头数据
       onRefresh();
+      
+      return serverResult;
 
     } catch (error) {
       console.error('[EditScreen] 双轨处理失败:', error);
-      alert('上传失败，请重试');
       throw error;
-    } finally {
-      setUploading({ shotId: null, progress: 0 });
-      setActiveShotId(null);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
     }
   };
 
   // 服务器渲染模式：原有上传逻辑
-  const handleServerSideUpload = async (file: File, shotId: number) => {
-    setUploading({ shotId, progress: 0 });
+  const handleServerSideUpload = async (file: File, shotId: number, uploadItemId: string): Promise<any> => {
     console.log('[EditScreen] ====== 开始服务器上传 ======');
     console.log('[EditScreen] 文件名:', file.name, '大小:', (file.size / 1024 / 1024).toFixed(2), 'MB');
 
@@ -394,7 +502,10 @@ export default function EditScreen({
         xhr.upload.addEventListener('progress', (e) => {
           if (e.lengthComputable) {
             const progress = Math.round((e.loaded / e.total) * 100);
-            setUploading({ shotId, progress });
+            // 更新队列中的进度
+            setUploadQueue(prev => prev.map(item => 
+              item.id === uploadItemId ? { ...item, progress } : item
+            ));
           }
         });
 
@@ -434,48 +545,196 @@ export default function EditScreen({
           checkTranscodeStatusImmediately(result.transcode_task_id, result.id);
         }, 100);
       }
+      
+      return result;
 
     } catch (error) {
       console.error('上传失败:', error);
-      alert('上传失败，请重试');
-    } finally {
-      setUploading({ shotId: null, progress: 0 });
-      setActiveShotId(null);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
+      throw error;
     }
   };
+
+  // 添加上传任务到队列
+  const addToUploadQueue = useCallback((files: FileList, shotId: number) => {
+    const newItems: UploadQueueItem[] = [];
+    
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const isVideo = file.type.startsWith('video/');
+      const isImage = file.type.startsWith('image/');
+      
+      if (!isVideo && !isImage) {
+        console.warn(`[Upload Queue] 跳过不支持的文件: ${file.name}`);
+        continue;
+      }
+      
+      const item: UploadQueueItem = {
+        id: `upload_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 9)}`,
+        shotId,
+        file,
+        fileName: file.name,
+        status: 'pending',
+        progress: 0,
+      };
+      newItems.push(item);
+    }
+    
+    if (newItems.length === 0) {
+      alert('没有有效的视频或图片文件');
+      return;
+    }
+    
+    const updatedQueue = [...uploadQueue, ...newItems];
+    setUploadQueue(updatedQueue);
+    setCurrentShotId(shotId);
+    console.log(`[Upload Queue] 添加了 ${newItems.length} 个文件到队列`, newItems.map(i => i.fileName));
+    
+    // 立即更新 ref，确保 processUploadQueue 能获取最新队列
+    uploadQueueRef.current = updatedQueue;
+    
+    // 触发队列处理
+    setTimeout(() => processUploadQueue(), 0);
+  }, [uploadQueue]);
+
+  // 处理上传队列
+  const processUploadQueue = useCallback(async () => {
+    // 防止重复执行
+    if (isProcessingQueueRef.current) {
+      console.log('[Upload Queue] 已有上传任务在执行，跳过');
+      return;
+    }
+    
+    // 检查队列中是否有待处理的文件
+    const currentQueue = uploadQueueRef.current;
+    const pendingItem = currentQueue.find(item => item.status === 'pending');
+    if (!pendingItem) {
+      console.log('[Upload Queue] 没有待处理的文件');
+      return;
+    }
+    
+    console.log(`[Upload Queue] 开始处理: ${pendingItem.fileName}`);
+    setIsProcessingQueue(true);
+    
+    // 更新为上传中状态
+    setUploadQueue(prev => prev.map(item => 
+      item.id === pendingItem.id ? { ...item, status: 'uploading' } : item
+    ));
+    
+    try {
+      const file = pendingItem.file;
+      const isVideo = file.type.startsWith('video/');
+      const shotId = currentShotIdRef.current!;
+      
+      let result: any;
+      
+      if (isVideo && clientRenderStateRef.current.isEnabled) {
+        // 客户端渲染模式
+        result = await handleClientSideUpload(file, shotId, pendingItem.id);
+      } else {
+        // 服务器上传模式
+        result = await handleServerSideUpload(file, shotId, pendingItem.id);
+      }
+      
+      console.log(`[Upload Queue] 上传完成: ${pendingItem.fileName}`, result);
+      
+      // 标记为完成
+      setUploadQueue(prev => prev.map(item => 
+        item.id === pendingItem.id 
+          ? { ...item, status: 'completed', materialId: result.id, transcodeTaskId: result.transcode_task_id }
+          : item
+      ));
+      
+    } catch (error) {
+      console.error(`[Upload Queue] 上传失败: ${pendingItem.fileName}`, error);
+      // 标记为失败
+      setUploadQueue(prev => prev.map(item => 
+        item.id === pendingItem.id 
+          ? { ...item, status: 'failed', error: error instanceof Error ? error.message : '上传失败' }
+          : item
+      ));
+    } finally {
+      setIsProcessingQueue(false);
+      // 继续处理下一个
+      setTimeout(() => processUploadQueue(), 100);
+    }
+  }, []); // 空依赖数组，使用 ref 获取最新值
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files || files.length === 0 || activeShotId === null) return;
 
-    const file = files[0];
-    const isVideo = file.type.startsWith('video/');
-    const isImage = file.type.startsWith('image/');
-
-    if (!isVideo && !isImage) {
-      alert('请上传视频或图片文件');
-      return;
-    }
-
-    // 图片文件仍然走服务器上传
-    if (isImage) {
-      await handleServerSideUpload(file, activeShotId);
-      return;
-    }
-
-    // 视频文件根据客户端渲染开关选择路径
-    if (clientRenderState.isEnabled && isVideo) {
-      await handleClientSideUpload(file, activeShotId);
-    } else {
-      await handleServerSideUpload(file, activeShotId);
+    // 添加到上传队列
+    addToUploadQueue(files, activeShotId);
+    
+    // 清空input，允许再次选择相同文件
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
     }
   };
 
   const handleDeleteMaterial = async (shotId: number, materialId: string) => {
     await onDeleteMaterial(materialId);
+  };
+
+  // 重试转码
+  const handleRetryTranscode = async (material: Material) => {
+    if (!material.transcode_task_id) {
+      alert('该素材没有转码任务ID，无法重试');
+      return;
+    }
+
+    console.log(`[Retry Transcode] 开始重试转码: ${material.id}`);
+    
+    // 从失败集合中移除
+    setTranscodeFailedMaterials(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(material.id);
+      return newSet;
+    });
+    
+    // 添加到转码集合
+    setTranscodingMaterials(prev => new Set(prev).add(material.id));
+    
+    try {
+      // 调用后端重试接口
+      const response = await fetch(`${API_BASE_URL}/api/transcode/${material.transcode_task_id}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`[Retry Transcode] 重试成功:`, data);
+        
+        // 开始检查转码状态
+        setTimeout(() => {
+          checkTranscodeStatusImmediately(material.transcode_task_id!, material.id);
+        }, 100);
+      } else {
+        const error = await response.json();
+        console.error(`[Retry Transcode] 重试失败:`, error);
+        alert(`重试转码失败: ${error.error || '未知错误'}`);
+        
+        // 恢复失败状态
+        setTranscodingMaterials(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(material.id);
+          return newSet;
+        });
+        setTranscodeFailedMaterials(prev => new Set(prev).add(material.id));
+      }
+    } catch (error) {
+      console.error(`[Retry Transcode] 重试异常:`, error);
+      alert('重试转码失败，请检查网络连接');
+      
+      // 恢复失败状态
+      setTranscodingMaterials(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(material.id);
+        return newSet;
+      });
+      setTranscodeFailedMaterials(prev => new Set(prev).add(material.id));
+    }
   };
 
   // Sort shots by sequence
@@ -488,10 +747,11 @@ export default function EditScreen({
 
   return (
     <div className="flex flex-col h-full w-full bg-gray-50">
-      {/* Hidden file input */}
+      {/* Hidden file input - 支持多文件选择 */}
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept="video/*,image/*"
         onChange={handleFileSelect}
         className="hidden"
@@ -518,6 +778,14 @@ export default function EditScreen({
               服务器渲染
             </span>
           )}
+          {/* WebSocket状态指示器 */}
+          {wsStatus === 'connected' ? (
+            <span className="w-2 h-2 rounded-full bg-green-500" title="实时连接正常" />
+          ) : wsStatus === 'connecting' ? (
+            <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" title="连接中..." />
+          ) : (
+            <span className="w-2 h-2 rounded-full bg-red-500" title="实时连接断开，使用轮询模式" />
+          )}
         </div>
         {/* 客户端渲染开关 */}
         <button
@@ -528,6 +796,118 @@ export default function EditScreen({
           <Cpu size={20} />
         </button>
       </header>
+
+      {/* 全局转码进度面板 */}
+      {(transcodingMaterials.size > 0 || transcodeFailedMaterials.size > 0) && (
+        <div className="bg-white border-b border-gray-200 p-3 mx-3 mt-2 rounded-xl shadow-sm">
+          <div 
+            className="flex items-center justify-between cursor-pointer"
+            onClick={() => setShowTranscodePanel(!showTranscodePanel)}
+          >
+            <div className="flex items-center gap-2">
+              <Loader2 size={16} className={`text-blue-600 ${transcodingMaterials.size > 0 ? 'animate-spin' : ''}`} />
+              <span className="font-medium text-sm text-gray-900">
+                转码任务 ({transcodingMaterials.size + transcodeFailedMaterials.size})
+              </span>
+              {transcodingMaterials.size > 0 && (
+                <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] rounded-full">
+                  处理中 {transcodingMaterials.size}
+                </span>
+              )}
+              {transcodeFailedMaterials.size > 0 && (
+                <span className="px-2 py-0.5 bg-red-100 text-red-700 text-[10px] rounded-full">
+                  失败 {transcodeFailedMaterials.size}
+                </span>
+              )}
+            </div>
+            <ChevronLeft 
+              size={16} 
+              className={`text-gray-400 transition-transform ${showTranscodePanel ? '-rotate-90' : ''}`}
+            />
+          </div>
+          
+          {showTranscodePanel && (
+            <div className="mt-3 space-y-2 max-h-40 overflow-y-auto">
+              {/* 正在转码的素材 */}
+              {Array.from(transcodingMaterials).map(materialId => {
+                const progress = transcodeProgressMap.get(materialId) || 0;
+                // 查找素材信息
+                let materialName = '未知素材';
+                let materialThumb = '';
+                for (const shot of shots) {
+                  const mat = shot.materials.find(m => m.id === materialId);
+                  if (mat) {
+                    materialName = mat.name || `素材-${materialId.slice(-6)}`;
+                    materialThumb = mat.thumbnail;
+                    break;
+                  }
+                }
+                
+                return (
+                  <div key={materialId} className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
+                    <div className="w-8 h-8 rounded bg-gray-200 overflow-hidden shrink-0">
+                      {materialThumb && (
+                        <img 
+                          src={`${API_BASE_URL}${materialThumb}`} 
+                          alt="" 
+                          className="w-full h-full object-cover"
+                        />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs text-gray-700 truncate">{materialName}</div>
+                      <div className="flex items-center gap-2 mt-1">
+                        <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                            style={{ width: `${progress}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] text-gray-500 w-8 text-right">{progress}%</span>
+                      </div>
+                    </div>
+                    <Loader2 size={14} className="animate-spin text-blue-500 shrink-0" />
+                  </div>
+                );
+              })}
+              
+              {/* 转码失败的素材 */}
+              {Array.from(transcodeFailedMaterials).map(materialId => {
+                // 查找素材信息
+                let materialName = '未知素材';
+                let materialThumb = '';
+                for (const shot of shots) {
+                  const mat = shot.materials.find(m => m.id === materialId);
+                  if (mat) {
+                    materialName = mat.name || `素材-${materialId.slice(-6)}`;
+                    materialThumb = mat.thumbnail;
+                    break;
+                  }
+                }
+                
+                return (
+                  <div key={materialId} className="flex items-center gap-2 p-2 bg-red-50 rounded-lg">
+                    <div className="w-8 h-8 rounded bg-gray-200 overflow-hidden shrink-0">
+                      {materialThumb && (
+                        <img 
+                          src={`${API_BASE_URL}${materialThumb}`} 
+                          alt="" 
+                          className="w-full h-full object-cover"
+                        />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs text-red-700 truncate">{materialName}</div>
+                      <div className="text-[10px] text-red-500">转码失败</div>
+                    </div>
+                    <AlertCircle size={14} className="text-red-500 shrink-0" />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 客户端渲染面板 */}
       {showClientRenderPanel && (
@@ -615,61 +995,143 @@ export default function EditScreen({
             </div>
             
             <div className="flex gap-2 overflow-x-auto pb-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-              <button 
+              <button
                 onClick={() => handleAddMaterialClick(shot.id)}
-                disabled={uploading.shotId === shot.id}
-                className="w-20 h-28 shrink-0 border-2 border-dashed border-gray-200 rounded-lg flex flex-col items-center justify-center text-gray-400 hover:border-blue-400 hover:text-blue-500 bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed relative overflow-hidden"
+                className="w-20 h-28 shrink-0 border-2 border-dashed border-gray-200 rounded-lg flex flex-col items-center justify-center text-gray-400 hover:border-blue-400 hover:text-blue-500 bg-gray-50 transition-colors relative overflow-hidden"
               >
-                {uploading.shotId === shot.id ? (
-                  <>
-                    <div className="absolute inset-0 bg-blue-50 transition-all" style={{ width: `${uploading.progress}%` }} />
-                    <span className="text-[10px] relative z-10 text-blue-600 font-medium">{uploading.progress}%</span>
-                  </>
-                ) : (
-                  <>
-                    <Plus size={20} className="mb-1" />
-                    <span className="text-[10px]">添加素材</span>
-                  </>
-                )}
+                {/* 显示当前镜头的上传状态 */}
+                {(() => {
+                  const shotUploadingItem = uploadQueue.find(item => item.shotId === shot.id && item.status === 'uploading');
+                  const shotPendingItems = uploadQueue.filter(item => item.shotId === shot.id && item.status === 'pending');
+                  const shotPendingCount = shotPendingItems.length;
+                  
+                  // 当前正在上传
+                  if (shotUploadingItem) {
+                    return (
+                      <>
+                        <div className="absolute inset-0 bg-blue-50 transition-all" style={{ width: `${shotUploadingItem.progress}%` }} />
+                        <div className="relative z-10 flex flex-col items-center px-1">
+                          <span className="text-[9px] text-blue-600 font-medium truncate w-full text-center">
+                            {shotUploadingItem.fileName}
+                          </span>
+                          <span className="text-[10px] text-blue-600 font-medium">
+                            {shotUploadingItem.progress}%
+                          </span>
+                          {shotPendingCount > 0 && (
+                            <span className="text-[8px] text-blue-500 mt-0.5">
+                              等待 {shotPendingCount} 个
+                            </span>
+                          )}
+                        </div>
+                      </>
+                    );
+                  }
+                  
+                  // 有等待中的文件（在其他镜头上传时）
+                  if (shotPendingCount > 0) {
+                    const firstPendingItem = shotPendingItems[0];
+                    return (
+                      <>
+                        <div className="absolute inset-0 bg-yellow-50" />
+                        <div className="relative z-10 flex flex-col items-center px-1">
+                          <Loader2 size={16} className="animate-spin text-yellow-600 mb-1" />
+                          <span className="text-[9px] text-yellow-700 font-medium truncate w-full text-center">
+                            {firstPendingItem.fileName}
+                          </span>
+                          <span className="text-[8px] text-yellow-600 mt-0.5">
+                            队列中 {shotPendingCount} 个
+                          </span>
+                        </div>
+                      </>
+                    );
+                  }
+                  
+                  return (
+                    <>
+                      <Plus size={20} className="mb-1" />
+                      <span className="text-[10px]">添加素材</span>
+                    </>
+                  );
+                })()}
               </button>
-              {(shot.materials || []).map((material) => (
-                <div 
-                  key={material.id} 
-                  className="w-20 h-28 shrink-0 rounded-lg overflow-hidden relative group bg-gray-200"
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    if (confirm('确定要删除这个素材吗？')) {
-                      handleDeleteMaterial(shot.id, material.id);
-                    }
-                  }}
-                >
-                  <img 
-                    src={`${API_BASE_URL}${material.thumbnail}`} 
-                    alt={material.name} 
-                    className="w-full h-full object-cover" 
-                    referrerPolicy="no-referrer" 
-                  />
-                  {/* Type indicator */}
-                  <div className="absolute top-1 left-1 bg-black/60 text-white p-0.5 rounded">
-                    {material.type === 'video' ? <Film size={10} /> : <ImageIcon size={10} />}
-                  </div>
-                  {/* Duration badge */}
-                  {material.duration && (
-                    <div className="absolute bottom-1 right-1 bg-black/60 text-white text-[9px] px-1 rounded">
-                      {material.duration}
-                    </div>
-                  )}
-                  {/* Delete button - always visible on mobile, hover on desktop */}
-                  <button 
-                    onClick={() => handleDeleteMaterial(shot.id, material.id)}
-                    className="absolute top-1 right-1 p-1 bg-red-500 text-white rounded-full opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-md"
-                    style={{ zIndex: 10 }}
-                    aria-label="删除素材"
+              {(shot.materials || []).map((material) => {
+                const isTranscoding = material.transcode_status === 'processing' || transcodingMaterials.has(material.id);
+                const isTranscodeFailed = material.transcode_status === 'failed' || transcodeFailedMaterials.has(material.id);
+                const isTranscodeCompleted = material.transcode_status === 'completed' && !isTranscoding && !isTranscodeFailed;
+                
+                return (
+                  <div 
+                    key={material.id} 
+                    className={`w-20 h-28 shrink-0 rounded-lg overflow-hidden relative group bg-gray-200 ${isTranscoding ? 'ring-2 ring-blue-400' : ''} ${isTranscodeFailed ? 'ring-2 ring-red-400' : ''}`}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      if (confirm('确定要删除这个素材吗？')) {
+                        handleDeleteMaterial(shot.id, material.id);
+                      }
+                    }}
                   >
-                    <Trash2 size={10} />
-                  </button>
-                </div>
-              ))}
+                    <img 
+                      src={`${API_BASE_URL}${material.thumbnail}`} 
+                      alt={material.name} 
+                      className={`w-full h-full object-cover ${isTranscoding ? 'opacity-60' : ''}`}
+                      referrerPolicy="no-referrer" 
+                    />
+                    
+                    {/* 转码状态遮罩层 */}
+                    {isTranscoding && (
+                      <div className="absolute inset-0 bg-blue-500/20 flex flex-col items-center justify-center">
+                        <Loader2 size={20} className="animate-spin text-blue-600 mb-1" />
+                        <span className="text-[9px] text-blue-700 font-medium bg-white/80 px-1.5 py-0.5 rounded">转码中</span>
+                      </div>
+                    )}
+                    
+                    {/* 转码失败遮罩层 */}
+                    {isTranscodeFailed && (
+                      <div className="absolute inset-0 bg-red-500/30 flex flex-col items-center justify-center">
+                        <AlertCircle size={20} className="text-red-600 mb-1" />
+                        <span className="text-[9px] text-red-700 font-medium bg-white/90 px-1.5 py-0.5 rounded mb-1">转码失败</span>
+                        {/* 重试按钮 */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRetryTranscode(material);
+                          }}
+                          className="flex items-center gap-0.5 px-2 py-0.5 bg-red-600 text-white text-[9px] rounded-full hover:bg-red-700 transition-colors"
+                        >
+                          <RefreshCw size={8} />
+                          重试
+                        </button>
+                      </div>
+                    )}
+                    
+                    {/* Type indicator */}
+                    <div className="absolute top-1 left-1 bg-black/60 text-white p-0.5 rounded flex items-center gap-0.5">
+                      {material.type === 'video' ? <Film size={10} /> : <ImageIcon size={10} />}
+                      {/* 转码完成指示器 */}
+                      {isTranscodeCompleted && material.type === 'video' && (
+                        <CheckCircle2 size={8} className="text-green-400" />
+                      )}
+                    </div>
+                    
+                    {/* Duration badge */}
+                    {material.duration && (
+                      <div className="absolute bottom-1 right-1 bg-black/60 text-white text-[9px] px-1 rounded">
+                        {material.duration}
+                      </div>
+                    )}
+                    
+                    {/* Delete button - always visible on mobile, hover on desktop */}
+                    <button 
+                      onClick={() => handleDeleteMaterial(shot.id, material.id)}
+                      className="absolute top-1 right-1 p-1 bg-red-500 text-white rounded-full opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shadow-md"
+                      style={{ zIndex: 10 }}
+                      aria-label="删除素材"
+                    >
+                      <Trash2 size={10} />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
         ))}
@@ -720,7 +1182,15 @@ export default function EditScreen({
               <Loader2 size={18} className="animate-spin" />
               生成中...
             </>
-          ) : hasTranscodingMaterials ? (
+          ) : currentUploadItem ? (
+            <>
+              <Loader2 size={18} className="animate-spin" />
+              上传中 {currentUploadItem?.progress || 0}%
+              {uploadQueue.length > 1 && (
+                <span className="text-xs">({uploadQueue.filter(i => i.status === 'completed').length + 1}/{uploadQueue.length})</span>
+              )}
+            </>
+          ) : transcodingMaterials.size > 0 ? (
             <>
               <Loader2 size={18} className="animate-spin" />
               转码中...

@@ -117,7 +117,7 @@ export default function HomeScreen({ onNavigate, userId }: HomeScreenProps) {
     <div className="flex flex-col h-full w-full bg-gray-50">
       {/* Header */}
       <header className="flex items-center justify-center h-14 shrink-0 bg-white border-b border-gray-100">
-        <h1 className="text-lg font-bold text-gray-900">易媒助手</h1>
+        <h1 className="text-lg font-bold text-gray-900">FengMa-AI</h1>
       </header>
       
       <div className="flex-1 overflow-y-auto p-4">

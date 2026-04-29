@@ -394,11 +394,24 @@ def get_task_status(task_id):
 
 @renders_bp.route('/combinations/<combo_id>/download', methods=['POST'])
 def download_combination(combo_id):
-    """Download video - 优先使用OSS URL"""
+    """
+    Download video - 强制使用OSS URL
+    
+    修复说明：
+    1. 下载必须使用服务器FFmpeg渲染后上传到OSS的公网URL
+    2. 不能使用客户端浏览器渲染的Blob URL（效果差）
+    3. 不能使用服务器本地文件路径（CORS问题，且生产环境无法访问）
+    4. 如果没有OSS URL，触发服务器渲染并返回processing状态
+    """
     try:
         parts = combo_id.split('_')
         if len(parts) < 3 or parts[0] != 'combo':
             return jsonify({'error': '无效的组合ID'}), 400
+        
+        user_id = parts[1]
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
         
         render = Render.query.get(combo_id)
         if not render:
@@ -407,7 +420,16 @@ def download_combination(combo_id):
                 'error': '视频不存在'
             }), 404
         
-        # 优先使用OSS URL（用于下载和文字快剪）
+        # 优先级1: server_video_url（服务器FFmpeg高质量视频URL）
+        if render.server_video_url:
+            return jsonify({
+                'status': 'completed',
+                'video_url': render.server_video_url,
+                'mode': 'redirect',
+                'source': 'server_oss'
+            })
+        
+        # 优先级2: oss_url（普通OSS URL）
         if render.oss_url:
             return jsonify({
                 'status': 'completed',
@@ -416,23 +438,69 @@ def download_combination(combo_id):
                 'source': 'oss'
             })
         
-        # 如果没有OSS URL，使用本地文件
-        if render.file_path and os.path.exists(render.file_path):
-            output_filename = os.path.basename(render.file_path)
+        # 优先级3: 触发服务器渲染+上传OSS
+        # 检查是否已经在处理中
+        for task_id, task in render_tasks.items():
+            if task.get('combo_id') == combo_id and task.get('type') == 'server_concat':
+                if task['status'] == 'processing':
+                    return jsonify({
+                        'status': 'processing',
+                        'progress': task.get('progress', 0),
+                        'message': '视频正在准备中，请稍后再试'
+                    })
+                elif task['status'] == 'completed' and task.get('oss_url'):
+                    return jsonify({
+                        'status': 'completed',
+                        'video_url': task['oss_url'],
+                        'mode': 'redirect',
+                        'source': 'server_oss'
+                    })
+        
+        # 启动服务器渲染任务
+        material_ids = json.loads(render.material_ids)
+        material_files = []
+        
+        for mat_id in material_ids:
+            material = Material.query.get(mat_id)
+            if material and material.user_id == user_id:
+                if material.unified_path and os.path.exists(material.unified_path):
+                    material_files.append(material.unified_path)
+                elif material.file_path and os.path.exists(material.file_path):
+                    material_files.append(material.file_path)
+        
+        if not material_files:
             return jsonify({
-                'status': 'completed',
-                'video_url': f'/renders/{output_filename}',
-                'download_url': f'/api/download/file?path={output_filename}&name=mixcut_{combo_id}.mp4',
-                'mode': 'redirect',
-                'source': 'local'
-            })
+                'status': 'failed',
+                'error': '素材文件不存在'
+            }), 404
+        
+        # 生成输出路径
+        timestamp = int(time.time())
+        output_filename = f"combo_{combo_id}_{timestamp}.mp4"
+        output_path = os.path.join(RENDERS_FOLDER, output_filename)
+        
+        # 启动服务器高质量渲染任务
+        task_id = f"server_render_{uuid.uuid4().hex[:8]}"
+        app = current_app._get_current_object()
+        
+        thread = threading.Thread(
+            target=server_concat_task,
+            args=(task_id, combo_id, material_files, output_path, user_id, app)
+        )
+        thread.daemon = True
+        thread.start()
         
         return jsonify({
-            'status': 'failed',
-            'error': '视频文件不存在，请重新生成'
-        }), 404
+            'status': 'processing',
+            'task_id': task_id,
+            'progress': 0,
+            'message': '视频正在准备中，请稍后再试'
+        })
         
     except Exception as e:
+        import traceback
+        current_app.logger.error(f"[Download] 下载处理失败: {e}")
+        current_app.logger.error(f"[Download] 详细错误: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 

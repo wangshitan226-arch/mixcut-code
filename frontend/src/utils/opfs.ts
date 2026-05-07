@@ -190,6 +190,44 @@ export async function deleteRender(renderId: string): Promise<boolean> {
 }
 
 /**
+ * 清理指定组合的旧渲染结果
+ * 用于在开始新的渲染前清理该组合之前的渲染缓存
+ */
+export async function cleanupOldRenders(combinationId: string): Promise<number> {
+  const root = await getRootDirectory();
+  let deletedCount = 0;
+
+  try {
+    const rendersDir = await root.getDirectoryHandle(RENDERS_DIR);
+    
+    // @ts-ignore - entries() 是 OPFS 标准 API
+    for await (const [name, handle] of rendersDir.entries()) {
+      if (handle.kind === 'file' && name.endsWith('.mp4')) {
+        const renderId = name.replace('.mp4', '');
+        // 检查是否是该组合的旧渲染结果（renderId 包含 combinationId）
+        if (renderId.includes(combinationId)) {
+          try {
+            await rendersDir.removeEntry(name);
+            console.log(`[OPFS] 清理旧渲染结果: ${renderId}`);
+            deletedCount++;
+          } catch (error) {
+            console.warn(`[OPFS] 清理旧渲染结果失败: ${renderId}`, error);
+          }
+        }
+      }
+    }
+    
+    if (deletedCount > 0) {
+      console.log(`[OPFS] 共清理 ${deletedCount} 个旧渲染结果 for combination: ${combinationId}`);
+    }
+  } catch {
+    // 目录可能不存在
+  }
+
+  return deletedCount;
+}
+
+/**
  * 获取所有素材ID列表
  */
 export async function listMaterials(): Promise<string[]> {

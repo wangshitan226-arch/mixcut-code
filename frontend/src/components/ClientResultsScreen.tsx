@@ -104,10 +104,26 @@ export default function ClientResultsScreen({
   // Cleanup blob URLs on unmount
   useEffect(() => {
     return () => {
-      blobUrlsRef.current.forEach(url => releaseBlobUrl(url));
+      console.log('[ClientResultsScreen] 组件卸载，清理所有 Blob URL...');
+      
+      // 清理 blobUrlsRef 中的 URL
+      blobUrlsRef.current.forEach(url => {
+        releaseBlobUrl(url);
+        console.log('[ClientResultsScreen] 释放 Blob URL:', url.substring(0, 50) + '...');
+      });
       blobUrlsRef.current.clear();
+      
+      // 清理 localVideos 中的 URL
+      localVideos.forEach((url, itemId) => {
+        if (url.startsWith('blob:')) {
+          releaseBlobUrl(url);
+          console.log('[ClientResultsScreen] 释放 localVideos Blob URL:', itemId);
+        }
+      });
+      
+      console.log('[ClientResultsScreen] Blob URL 清理完成');
     };
-  }, []);
+  }, [localVideos]);
 
   const checkClientRenderingSupport = async () => {
     try {

@@ -115,9 +115,23 @@ export default function ResultsScreen({
   // 渲染状态锁定 - 防止重复渲染同一视频
   const renderingIdsRef = useRef<Set<string>>(new Set());
   
+  // 服务器渲染状态跟踪 - 用于检测进行中的服务器渲染任务
+  // 因为 POST /server-render 是异步的，在请求返回前数据库状态还未更新
+  const serverRenderingIdsRef = useRef<Set<string>>(new Set());
+  
+  // 是否正在跳转到 KaipaiEditor（如果是，不要清理 Blob URL）
+  const navigatingToKaipaiRef = useRef(false);
+  
   // 组件卸载时清理所有 Blob URL
   useEffect(() => {
     return () => {
+      // 如果正在跳转到 KaipaiEditor，不要清理 Blob URL
+      // 因为 KaipaiEditor 需要使用这些 URL 进行预览
+      if (navigatingToKaipaiRef.current) {
+        console.log('[ResultsScreen] 跳转到 KaipaiEditor，保留 Blob URL');
+        return;
+      }
+      
       // 清理客户端渲染的 Blob URL
       clientRenderedVideos.forEach((url) => {
         if (url.startsWith('blob:')) {
@@ -414,6 +428,14 @@ export default function ResultsScreen({
 
   // 启动服务器FFmpeg高质量拼接并上传OSS（视频①）
   const startServerFFmpegRender = useCallback(async (item: ResultItem) => {
+    // 检查是否已经在渲染中（防止重复启动）
+    if (serverRenderingIdsRef.current.has(item.id)) {
+      console.log(`[双轨制] 服务器渲染已在进行中，跳过重复启动: ${item.id}`);
+      return null;
+    }
+    
+    // 标记为正在渲染
+    serverRenderingIdsRef.current.add(item.id);
     console.log(`[双轨制] ========== 服务器FFmpeg拼接+OSS上传开始 ==========`);
     console.log(`[双轨制] 组合ID: ${item.id}`);
     console.log(`[双轨制] 当前状态: server_video_url=${item.server_video_url || '无'}`);
@@ -439,8 +461,12 @@ export default function ResultsScreen({
         setResults(prev => prev.map(r =>
           r.id === item.id ? { ...r, server_video_url: data.video_url } : r
         ));
-      } else if (data.status === 'processing' || data.status === 'local_ready') {
-        console.log(`[双轨制] ⏳ 服务器FFmpeg拼接+OSS上传中...`);
+      } else if (data.status === 'local_ready') {
+        console.log(`[双轨制] ⏳ 服务器FFmpeg拼接完成，OSS上传失败，使用本地视频`);
+        // 本地完成但OSS上传失败，也更新状态
+        setResults(prev => prev.map(r =>
+          r.id === item.id ? { ...r, server_video_url: data.video_url } : r
+        ));
       } else if (data.error) {
         console.error(`[双轨制] ❌ 服务器FFmpeg拼接+OSS上传失败: ${data.error}`);
       }
@@ -450,6 +476,8 @@ export default function ResultsScreen({
       console.error('[双轨制] ❌ 启动服务器FFmpeg拼接+OSS上传异常:', error);
       return null;
     } finally {
+      // 移除渲染标记
+      serverRenderingIdsRef.current.delete(item.id);
       console.log(`[双轨制] ========== 服务器FFmpeg拼接+OSS上传结束 ==========`);
     }
   }, []);
@@ -1062,12 +1090,17 @@ export default function ResultsScreen({
    * 4. 如果任一视频未准备好，显示"视频准备中"弹窗，等待两者都完成
    */
   const handleOpenKaipai = useCallback(async () => {
+    // 标记正在跳转到 KaipaiEditor，防止组件卸载时清理 Blob URL
+    navigatingToKaipaiRef.current = true;
+    
     const selectedItems = results.filter(r => r.selected);
     if (selectedItems.length === 0) {
+      navigatingToKaipaiRef.current = false;
       alert('请先选择一个视频');
       return;
     }
     if (selectedItems.length > 1) {
+      navigatingToKaipaiRef.current = false;
       alert('请只选择一个视频进行文字快剪');
       return;
     }
@@ -1111,6 +1144,68 @@ export default function ResultsScreen({
           preparePromises.push(
             new Promise<void>(async (resolve, reject) => {
               try {
+                // ===== 第1步：检查前端内存中是否已有进行中的渲染任务 =====
+                // 这是最重要的检查！因为 POST /server-render 是异步的，
+                // 在请求返回前数据库状态还未更新
+                if (serverRenderingIdsRef.current.has(item.id)) {
+                  console.log('[双轨制] 前端内存中发现进行中的服务器渲染任务，直接等待...');
+                  
+                  // 轮询等待前端标记清除（表示POST请求已完成）
+                  const waitForRendering = setInterval(async () => {
+                    if (!serverRenderingIdsRef.current.has(item.id)) {
+                      clearInterval(waitForRendering);
+                      
+                      // POST 已完成，现在检查数据库状态
+                      const statusResponse = await fetch(
+                        `${API_BASE_URL}/api/combinations/${item.id}/server-render/status`
+                      );
+                      const statusData = await statusResponse.json();
+                      
+                      if (statusData.status === 'completed' || statusData.status === 'local_ready') {
+                        serverVideoUrl = statusData.video_url;
+                        setResults(prev => prev.map(r =>
+                          r.id === item.id ? { ...r, server_video_url: statusData.video_url } : r
+                        ));
+                        resolve();
+                      } else {
+                        reject(new Error('服务器视频准备失败'));
+                      }
+                    }
+                  }, 500);
+                  
+                  // 最多等待2分钟
+                  setTimeout(() => {
+                    clearInterval(waitForRendering);
+                    reject(new Error('等待服务器渲染超时'));
+                  }, 120000);
+                  
+                  return;
+                }
+                
+                // ===== 第2步：检查数据库中是否已有完成的视频 =====
+                console.log('[双轨制] 检查数据库中是否已有完成的视频...');
+                const statusCheckResponse = await fetch(
+                  `${API_BASE_URL}/api/combinations/${item.id}/server-render/status`
+                );
+                
+                if (statusCheckResponse.ok) {
+                  const existingStatus = await statusCheckResponse.json();
+                  
+                  if (existingStatus.status === 'completed' || existingStatus.status === 'local_ready') {
+                    // 已经有完成的视频，直接使用
+                    console.log('[双轨制] 数据库中发现已完成的服务器视频:', existingStatus.video_url);
+                    serverVideoUrl = existingStatus.video_url;
+                    setResults(prev => prev.map(r =>
+                      r.id === item.id ? { ...r, server_video_url: existingStatus.video_url } : r
+                    ));
+                    resolve();
+                    return;
+                  }
+                  // 其他状态（pending/uploading/failed）都继续启动新的渲染
+                }
+                
+                // ===== 第3步：启动新的服务器渲染 =====
+                console.log('[双轨制] 没有进行中的任务，启动新的服务器渲染');
                 const serverResponse = await fetch(
                   `${API_BASE_URL}/api/combinations/${item.id}/server-render`,
                   { method: 'POST', headers: { 'Content-Type': 'application/json' } }
@@ -1118,38 +1213,16 @@ export default function ResultsScreen({
                 
                 const serverData = await serverResponse.json();
                 
-                if (serverData.status === 'completed') {
+                if (serverData.status === 'completed' || serverData.status === 'local_ready') {
                   serverVideoUrl = serverData.video_url;
                   setResults(prev => prev.map(r =>
                     r.id === item.id ? { ...r, server_video_url: serverData.video_url } : r
                   ));
                   resolve();
-                } else if (serverData.status === 'processing' || serverData.status === 'local_ready') {
-                  // 轮询等待完成
-                  const checkInterval = setInterval(async () => {
-                    try {
-                      const statusResponse = await fetch(
-                        `${API_BASE_URL}/api/combinations/${item.id}/server-render/status`
-                      );
-                      const statusData = await statusResponse.json();
-                      
-                      if (statusData.status === 'completed') {
-                        clearInterval(checkInterval);
-                        serverVideoUrl = statusData.video_url;
-                        setResults(prev => prev.map(r =>
-                          r.id === item.id ? { ...r, server_video_url: statusData.video_url } : r
-                        ));
-                        resolve();
-                      } else if (statusData.status === 'failed') {
-                        clearInterval(checkInterval);
-                        reject(new Error(statusData.error || '服务器视频准备失败'));
-                      }
-                    } catch (e) {
-                      console.error('[双轨制] 轮询轨道①失败:', e);
-                    }
-                  }, 2000);
                 } else if (serverData.error) {
                   reject(new Error(serverData.error));
+                } else {
+                  reject(new Error('服务器视频准备失败'));
                 }
               } catch (error) {
                 reject(error);
@@ -1262,6 +1335,21 @@ export default function ResultsScreen({
     setShowKaipaiEditor(false);
     setKaipaiEditId('');
     setKaipaiVideoUrl('');
+    setKaipaiClientVideoUrl('');
+    
+    // 重置跳转标志
+    navigatingToKaipaiRef.current = false;
+    
+    // 清理该视频对应的 Blob URL（因为 KaipaiEditor 已经用完了）
+    const selectedItems = results.filter(r => r.selected);
+    if (selectedItems.length === 1) {
+      const item = selectedItems[0];
+      const blobUrl = clientRenderedVideosRef.current.get(item.id);
+      if (blobUrl && blobUrl.startsWith('blob:')) {
+        releaseBlobUrl(blobUrl);
+        console.log('[ResultsScreen] 关闭 KaipaiEditor，清理 Blob URL:', item.id);
+      }
+    }
   };
 
   const filteredResults = activeFilter === '全部' 

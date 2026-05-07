@@ -5,7 +5,7 @@
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { getFFmpeg } from './ffmpeg';
-import { loadMaterial, saveRender, loadRender, hasMaterial } from './opfs';
+import { loadMaterial, saveRender, loadRender, hasMaterial, cleanupOldRenders } from './opfs';
 import { loadMaterialFromIndexedDB, loadRenderFromIndexedDB } from './indexedDB';
 
 // 渲染进度回调
@@ -51,6 +51,11 @@ export async function renderPreview(
 
   try {
     onProgress?.(0, 'loading_materials');
+    
+    // 修复：在开始新的渲染前，清理该组合的旧渲染结果
+    // 这是为了防止使用缓存的旧渲染结果
+    console.log(`[ClientRenderer] 清理组合 ${combination.id} 的旧渲染结果...`);
+    await cleanupOldRenders(combination.id);
 
     // 加载素材
     const materialFiles = await loadMaterialsForRender(combination.materials);
@@ -342,23 +347,33 @@ async function encodeConcatVideos(
 
 /**
  * 加载素材用于渲染
+ * 
+ * 修复说明：
+ * 1. 添加素材存在性验证，确保加载到的素材是正确的
+ * 2. 如果素材在本地存储中不存在，抛出错误让上层降级到服务器渲染
+ * 3. 添加详细的日志记录，便于排查问题
  */
 async function loadMaterialsForRender(
   materials: MaterialInfo[]
 ): Promise<File[]> {
   const files: File[] = [];
 
+  console.log(`[ClientRenderer] 开始加载 ${materials.length} 个素材用于渲染`);
+
   for (const material of materials) {
     let file: File | null = null;
+    let source = '';
 
     // 优先从 OPFS 加载
     try {
       const opfsResult = await loadMaterial(material.id);
       if (opfsResult.video) {
         file = opfsResult.video;
+        source = 'OPFS';
+        console.log(`[ClientRenderer] 素材 ${material.id} 从 OPFS 加载成功，大小: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
       }
-    } catch {
-      // OPFS 加载失败
+    } catch (error) {
+      console.log(`[ClientRenderer] 素材 ${material.id} 从 OPFS 加载失败:`, error);
     }
 
     // 降级到 IndexedDB
@@ -369,19 +384,29 @@ async function loadMaterialsForRender(
           file = new File([idbResult.video], `${material.id}.mp4`, {
             type: 'video/mp4',
           });
+          source = 'IndexedDB';
+          console.log(`[ClientRenderer] 素材 ${material.id} 从 IndexedDB 加载成功，大小: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
         }
-      } catch {
-        // IndexedDB 加载失败
+      } catch (error) {
+        console.log(`[ClientRenderer] 素材 ${material.id} 从 IndexedDB 加载失败:`, error);
       }
     }
 
     if (!file) {
+      console.error(`[ClientRenderer] 素材未找到: ${material.id}，将降级到服务器渲染`);
       throw new Error(`素材未找到: ${material.id}`);
+    }
+
+    // 验证素材文件有效性（文件大小必须大于0）
+    if (file.size === 0) {
+      console.error(`[ClientRenderer] 素材文件大小为0: ${material.id}，将降级到服务器渲染`);
+      throw new Error(`素材文件无效: ${material.id}`);
     }
 
     files.push(file);
   }
 
+  console.log(`[ClientRenderer] 所有 ${files.length} 个素材加载完成`);
   return files;
 }
 

@@ -3,8 +3,8 @@ import { ChevronLeft, Mic, Trash2, Plus, Film, Image as ImageIcon, Loader2, Cpu,
 import { io, Socket } from 'socket.io-client';
 import { useClientRendering } from '../hooks/useClientRendering';
 import { processMaterial, ProcessedMaterial } from '../utils/clientMaterialProcessor';
-import { isOPFSSupported } from '../utils/opfs';
-import { isIndexedDBSupported } from '../utils/indexedDB';
+import { isOPFSSupported, deleteMaterial as deleteMaterialFromOPFS, clearAllStorage as clearOPFSStorage, listMaterials } from '../utils/opfs';
+import { isIndexedDBSupported, deleteMaterialFromIndexedDB, clearAllIndexedDB, getIndexedDBStats } from '../utils/indexedDB';
 
 const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
 const WS_BASE_URL = API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
@@ -145,6 +145,50 @@ export default function EditScreen({
   const hasActiveUploads = React.useMemo(() => {
     return uploadQueue.some(item => item.status === 'pending' || item.status === 'uploading');
   }, [uploadQueue]);
+
+  // 启动时只清理"孤儿素材" - 那些在本地存在但在服务器已删除的素材
+  // 注意：只清理真正的孤儿素材，不要清理当前有效的素材
+  useEffect(() => {
+    const cleanupOrphanMaterials = async () => {
+      console.log('[EditScreen] 检查并清理孤儿素材...');
+      
+      try {
+        // 获取当前编辑界面中的素材ID列表
+        const currentMaterialIds = new Set(shots.flatMap(shot => shot.materials.map(m => m.id)));
+        
+        // 清理 OPFS 中的孤儿素材
+        if (isOPFSSupported()) {
+          const opfsMaterials = await listMaterials();
+          let opfsCleanedCount = 0;
+          
+          for (const materialId of opfsMaterials) {
+            // 只清理不在当前 shots 中的素材
+            // 注意：不清理当前有效的素材，因为它们可能在结果页面被使用
+            if (!currentMaterialIds.has(materialId)) {
+              console.log(`[EditScreen] 清理 OPFS 孤儿素材: ${materialId}`);
+              await deleteMaterialFromOPFS(materialId);
+              opfsCleanedCount++;
+            }
+          }
+          
+          if (opfsCleanedCount > 0) {
+            console.log(`[EditScreen] 清理了 ${opfsCleanedCount} 个 OPFS 孤儿素材`);
+          }
+        }
+        
+        // IndexedDB 不做自动清理，因为无法准确判断哪些是孤儿素材
+        // 避免误删导致结果页面无法预览
+        
+        console.log('[EditScreen] 孤儿素材清理检查完成');
+      } catch (error) {
+        console.error('[EditScreen] 清理孤儿素材失败:', error);
+      }
+    };
+    
+    // 延迟执行，确保组件完全挂载
+    const timer = setTimeout(cleanupOrphanMaterials, 2000);
+    return () => clearTimeout(timer);
+  }, []); // 只在组件挂载时执行一次
 
   // WebSocket连接 - 零延迟接收转码完成通知
   useEffect(() => {
@@ -673,7 +717,38 @@ export default function EditScreen({
   };
 
   const handleDeleteMaterial = async (shotId: number, materialId: string) => {
+    // 先删除后端素材
     await onDeleteMaterial(materialId);
+    
+    // 同步清理本地存储的素材（OPFS 和 IndexedDB）
+    // 这是修复预览视频显示错误素材的关键：删除素材时必须清理本地缓存
+    try {
+      console.log(`[EditScreen] 清理本地存储的素材: ${materialId}`);
+      
+      // 清理 OPFS
+      if (isOPFSSupported()) {
+        const opfsDeleted = await deleteMaterialFromOPFS(materialId);
+        console.log(`[EditScreen] OPFS 素材删除: ${opfsDeleted ? '成功' : '失败或不存在'}`);
+      }
+      
+      // 清理 IndexedDB
+      if (isIndexedDBSupported()) {
+        const idbDeleted = await deleteMaterialFromIndexedDB(materialId);
+        console.log(`[EditScreen] IndexedDB 素材删除: ${idbDeleted ? '成功' : '失败或不存在'}`);
+      }
+      
+      // 同时清理客户端处理过的素材缓存
+      setClientProcessedMaterials(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(materialId);
+        return newMap;
+      });
+      
+      console.log(`[EditScreen] 素材 ${materialId} 本地缓存清理完成`);
+    } catch (error) {
+      console.error(`[EditScreen] 清理本地素材失败: ${materialId}`, error);
+      // 清理失败不影响主流程，只记录错误
+    }
   };
 
   // 重试转码
@@ -967,6 +1042,46 @@ export default function EditScreen({
                 <span className={`px-1.5 py-0.5 rounded ${clientRenderState.capability.supportsWebCodecs ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                   WebCodecs
                 </span>
+              </div>
+              
+              {/* 手动清理缓存按钮 */}
+              <div className="pt-2 border-t border-gray-100 mt-2">
+                <button
+                  onClick={async () => {
+                    if (confirm('确定要清理所有本地缓存吗？这将删除所有已上传素材的本地副本，但不会影响服务器上的素材。')) {
+                      console.log('[EditScreen] 手动清理所有缓存...');
+                      try {
+                        // 清理 OPFS
+                        if (isOPFSSupported()) {
+                          await clearOPFSStorage();
+                          console.log('[EditScreen] OPFS 清理完成');
+                        }
+                        
+                        // 清理 IndexedDB
+                        if (isIndexedDBSupported()) {
+                          await clearAllIndexedDB();
+                          console.log('[EditScreen] IndexedDB 清理完成');
+                        }
+                        
+                        // 清理客户端处理过的素材缓存
+                        setClientProcessedMaterials(new Map());
+                        
+                        alert('本地缓存清理完成！');
+                        console.log('[EditScreen] 所有本地缓存清理完成');
+                      } catch (error) {
+                        console.error('[EditScreen] 清理缓存失败:', error);
+                        alert('清理缓存失败: ' + (error instanceof Error ? error.message : '未知错误'));
+                      }
+                    }
+                  }}
+                  className="w-full py-2 px-3 bg-red-50 text-red-600 text-xs rounded-lg hover:bg-red-100 transition-colors flex items-center justify-center gap-2"
+                >
+                  <Trash2 size={14} />
+                  清理所有本地缓存
+                </button>
+                <p className="text-[10px] text-gray-400 mt-1 text-center">
+                  如果预览出现错误素材，请尝试清理缓存
+                </p>
               </div>
             </div>
           ) : (

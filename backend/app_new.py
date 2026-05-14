@@ -19,7 +19,8 @@ Project Structure:
 │   ├── user_service.py
 │   ├── shot_service.py
 │   ├── material_service.py
-│   └── render_service.py
+│   ├── render_service.py
+│   └── channels_service.py  # 视频号运营服务
 └── routes/             # API routes (blueprints)
     ├── __init__.py
     ├── auth.py         # Authentication
@@ -29,7 +30,11 @@ Project Structure:
     ├── upload.py       # File upload
     ├── generate.py     # Video generation
     ├── renders.py      # Render results
-    └── static.py       # Static files
+    ├── static.py       # Static files
+    └── channels.py     # 视频号运营
+
+Usage:
+    python app_new.py
 
 To use this new structure:
 1. Move app.py to app_old.py (backup)
@@ -67,7 +72,8 @@ from routes import (
     renders_bp,
     static_bp,
     kaipai_bp,
-    oss_upload_bp
+    oss_upload_bp,
+    channels_bp
 )
 
 
@@ -141,16 +147,48 @@ def create_app():
     app.register_blueprint(renders_bp)
     app.register_blueprint(static_bp)
     app.register_blueprint(oss_upload_bp)
+    app.register_blueprint(channels_bp)  # 视频号运营路由
+    
+    @app.errorhandler(Exception)
+    def handle_all_exceptions(e):
+        print(f"[Global Exception] {type(e).__name__}: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        from flask import jsonify
+        return jsonify({'error': str(e), 'type': type(e).__name__}), 500
     
     # Debug: 打印所有路由
     print("Registered routes:")
     for rule in app.url_map.iter_rules():
-        if 'kaipai' in rule.endpoint:
+        if 'kaipai' in rule.endpoint or 'channels' in rule.endpoint:
             print(f"  {rule.rule} -> {rule.endpoint}")
     
     # Create tables
     with app.app_context():
         db.create_all()
+        
+        # 迁移：为 channels_video_monitors 添加自动回复字段
+        try:
+            with db.engine.connect() as conn:
+                result = conn.execute(db.text("PRAGMA table_info(channels_video_monitors)"))
+                columns = [row[1] for row in result]
+                
+                if 'auto_reply_enabled' not in columns:
+                    conn.execute(db.text("ALTER TABLE channels_video_monitors ADD COLUMN auto_reply_enabled BOOLEAN DEFAULT 0"))
+                    conn.commit()
+                    print("[Migration] 添加 auto_reply_enabled 字段")
+                
+                if 'auto_reply_text' not in columns:
+                    conn.execute(db.text("ALTER TABLE channels_video_monitors ADD COLUMN auto_reply_text TEXT"))
+                    conn.commit()
+                    print("[Migration] 添加 auto_reply_text 字段")
+                
+                if 'auto_reply_only_high_intent' not in columns:
+                    conn.execute(db.text("ALTER TABLE channels_video_monitors ADD COLUMN auto_reply_only_high_intent BOOLEAN DEFAULT 1"))
+                    conn.commit()
+                    print("[Migration] 添加 auto_reply_only_high_intent 字段")
+        except Exception as e:
+            print(f"[Migration] 迁移失败（可能字段已存在）: {e}")
     
     return app
 
@@ -159,4 +197,5 @@ if __name__ == '__main__':
     app = create_app()
     start_cleanup_scheduler()
     # Use socketio.run instead of app.run for WebSocket support
-    socketio.run(app, host='0.0.0.0', port=3002, debug=True, allow_unsafe_werkzeug=True)
+    # debug=False 避免 watchdog 检测到 Playwright 文件变化时自动重启
+    socketio.run(app, host='0.0.0.0', port=3002, debug=False, allow_unsafe_werkzeug=True)

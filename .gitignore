@@ -59,3 +59,6 @@ Thumbs.db
 
 
 backend/config.py
+
+backend/channels_user_data/
+backend/channels_cookies/

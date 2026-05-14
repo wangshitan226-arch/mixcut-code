@@ -217,3 +217,212 @@ class KaipaiEdit(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
+
+
+# ==================== 视频号运营功能模型 ====================
+
+class ChannelsAccount(db.Model):
+    """视频号账号模型"""
+    __tablename__ = 'channels_accounts'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
+    
+    # 账号信息
+    nickname = db.Column(db.String(100), nullable=False)
+    avatar = db.Column(db.String(500), nullable=True)
+    
+    # Cookie 文件路径（相对于项目目录）
+    cookie_path = db.Column(db.String(500), nullable=False)
+    
+    # 状态: normal(正常), expired(登录过期), invalid(失效)
+    status = db.Column(db.String(20), default='normal')
+    
+    # 最近登录时间
+    last_login_at = db.Column(db.DateTime, nullable=True)
+    
+    # 创建/更新时间
+    created_at = db.Column(db.DateTime, default=db.func.now())
+    updated_at = db.Column(db.DateTime, default=db.func.now(), onupdate=db.func.now())
+    
+    # 关联
+    user = db.relationship('User', backref='channels_accounts', lazy=True)
+    publish_records = db.relationship('ChannelsPublishRecord', backref='account', lazy=True, cascade='all, delete-orphan')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'nickname': self.nickname,
+            'avatar': self.avatar,
+            'status': self.status,
+            'last_login_at': self.last_login_at.isoformat() if self.last_login_at else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ChannelsPublishRecord(db.Model):
+    """视频号发布记录"""
+    __tablename__ = 'channels_publish_records'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
+    account_id = db.Column(db.Integer, db.ForeignKey('channels_accounts.id'), nullable=False)
+    render_id = db.Column(db.String(100), db.ForeignKey('renders.id'), nullable=True)
+    
+    # 发布内容
+    title = db.Column(db.String(200), nullable=False)
+    tags = db.Column(db.String(500), nullable=True)  # 话题标签，空格分隔
+    description = db.Column(db.Text, nullable=True)
+    cover_url = db.Column(db.String(500), nullable=True)  # 封面图片路径
+    video_path = db.Column(db.String(500), nullable=False)  # 发布的视频文件路径
+    
+    # 平台信息
+    platform_link = db.Column(db.String(500), nullable=True)  # 视频号链接
+    platform_video_id = db.Column(db.String(100), nullable=True)  # 平台视频ID
+    
+    # 状态: pending(等待中), uploading(上传中), publishing(发布中), success(成功), failed(失败)
+    status = db.Column(db.String(20), default='pending')
+    error_msg = db.Column(db.Text, nullable=True)
+    
+    # 创建时间
+    created_at = db.Column(db.DateTime, default=db.func.now())
+    completed_at = db.Column(db.DateTime, nullable=True)
+    
+    # 关联
+    user = db.relationship('User', backref='channels_publish_records', lazy=True)
+    render = db.relationship('Render', backref='channels_publish_records', lazy=True)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'account_id': self.account_id,
+            'render_id': self.render_id,
+            'title': self.title,
+            'tags': self.tags,
+            'description': self.description,
+            'cover_url': self.cover_url,
+            'video_path': self.video_path,
+            'platform_link': self.platform_link,
+            'platform_video_id': self.platform_video_id,
+            'status': self.status,
+            'error_msg': self.error_msg,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
+class ChannelsVideoMonitor(db.Model):
+    """视频号视频监控任务"""
+    __tablename__ = 'channels_video_monitors'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
+    account_id = db.Column(db.Integer, db.ForeignKey('channels_accounts.id'), nullable=False)
+    publish_record_id = db.Column(db.Integer, db.ForeignKey('channels_publish_records.id'), nullable=False)
+    
+    # 平台视频ID
+    platform_video_id = db.Column(db.String(100), nullable=False)
+    
+    # 监控状态: monitoring(监控中), stopped(已停止), expired(已过期)
+    status = db.Column(db.String(20), default='monitoring')
+    
+    # 最后抓取时间
+    last_fetch_at = db.Column(db.DateTime, nullable=True)
+    
+    # 评论统计
+    total_comments = db.Column(db.Integer, default=0)
+    new_comments = db.Column(db.Integer, default=0)
+    unreplied_comments = db.Column(db.Integer, default=0)
+    high_intent_comments = db.Column(db.Integer, default=0)
+    
+    # 自动回复配置
+    auto_reply_enabled = db.Column(db.Boolean, default=False)
+    auto_reply_text = db.Column(db.Text, nullable=True)
+    auto_reply_only_high_intent = db.Column(db.Boolean, default=True)
+    
+    # 创建时间
+    created_at = db.Column(db.DateTime, default=db.func.now())
+    updated_at = db.Column(db.DateTime, default=db.func.now(), onupdate=db.func.now())
+    
+    # 关联
+    user = db.relationship('User', backref='channels_video_monitors', lazy=True)
+    account = db.relationship('ChannelsAccount', backref='video_monitors', lazy=True)
+    publish_record = db.relationship('ChannelsPublishRecord', backref='video_monitor', lazy=True)
+    comments = db.relationship('ChannelsComment', backref='video_monitor', lazy=True, cascade='all, delete-orphan')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'account_id': self.account_id,
+            'publish_record_id': self.publish_record_id,
+            'platform_video_id': self.platform_video_id,
+            'status': self.status,
+            'last_fetch_at': self.last_fetch_at.isoformat() if self.last_fetch_at else None,
+            'total_comments': self.total_comments,
+            'new_comments': self.new_comments,
+            'unreplied_comments': self.unreplied_comments,
+            'high_intent_comments': self.high_intent_comments,
+            'auto_reply_enabled': self.auto_reply_enabled,
+            'auto_reply_text': self.auto_reply_text,
+            'auto_reply_only_high_intent': self.auto_reply_only_high_intent,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ChannelsComment(db.Model):
+    """视频号评论"""
+    __tablename__ = 'channels_comments'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    monitor_id = db.Column(db.Integer, db.ForeignKey('channels_video_monitors.id'), nullable=False)
+    
+    # 评论者信息
+    commenter_name = db.Column(db.String(100), nullable=False)
+    commenter_avatar = db.Column(db.String(500), nullable=True)
+    
+    # 评论内容
+    content = db.Column(db.Text, nullable=False)
+    
+    # 平台评论ID（用于回复）
+    platform_comment_id = db.Column(db.String(100), nullable=True)
+    
+    # 高意向标记
+    is_high_intent = db.Column(db.Boolean, default=False)
+    intent_keywords = db.Column(db.String(200), nullable=True)
+    
+    # 回复状态: pending(待回复), replied(已回复), ignored(已忽略)
+    reply_status = db.Column(db.String(20), default='pending')
+    reply_content = db.Column(db.Text, nullable=True)
+    replied_at = db.Column(db.DateTime, nullable=True)
+    
+    # 是否为新评论
+    is_new = db.Column(db.Boolean, default=True)
+    
+    # 评论时间（平台时间）
+    commented_at = db.Column(db.DateTime, nullable=True)
+    
+    # 创建时间（本地记录时间）
+    created_at = db.Column(db.DateTime, default=db.func.now())
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'monitor_id': self.monitor_id,
+            'commenter_name': self.commenter_name,
+            'commenter_avatar': self.commenter_avatar,
+            'content': self.content,
+            'platform_comment_id': self.platform_comment_id,
+            'is_high_intent': self.is_high_intent,
+            'intent_keywords': self.intent_keywords,
+            'reply_status': self.reply_status,
+            'reply_content': self.reply_content,
+            'replied_at': self.replied_at.isoformat() if self.replied_at else None,
+            'is_new': self.is_new,
+            'commented_at': self.commented_at.isoformat() if self.commented_at else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }

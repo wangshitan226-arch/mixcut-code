@@ -41,6 +41,7 @@ interface KaipaiEditorProps {
   editId: string;
   videoUrl: string;          // 视频①：服务器高质量视频URL（用于ASR/导出）
   clientVideoUrl?: string;   // 视频②：客户端预览视频URL（用于编辑器预览播放）
+  userId?: string;
   onBack: () => void;
   onSave?: () => void;
 }
@@ -49,6 +50,7 @@ export default function KaipaiEditor({
   editId,
   videoUrl,
   clientVideoUrl,
+  userId,
   onBack,
   onSave,
 }: KaipaiEditorProps) {
@@ -927,6 +929,7 @@ export default function KaipaiEditor({
         extractedTitle={saveSuccessData.extractedTitle}
         extractedKeywords={saveSuccessData.extractedKeywords}
         outputVideoUrl={saveSuccessData.outputVideoUrl}
+        userId={userId}
         onBack={handlePublishBack}
       />
     );

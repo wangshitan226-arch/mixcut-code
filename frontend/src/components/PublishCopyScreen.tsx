@@ -1,11 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import {
   ChevronLeft,
   Loader2,
   Copy,
   Check,
-  ExternalLink
+  ExternalLink,
+  Video,
+  AlertCircle
 } from 'lucide-react';
 
 const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
@@ -16,7 +18,14 @@ interface PublishCopyScreenProps {
   extractedTitle: string;
   extractedKeywords: string[];
   outputVideoUrl: string;
+  userId?: string;
   onBack: () => void;
+}
+
+interface Account {
+  id: number;
+  nickname: string;
+  status: 'normal' | 'expired' | 'invalid';
 }
 
 type Platform = 'xiaohongshu' | 'shipinhao';
@@ -27,6 +36,7 @@ export default function PublishCopyScreen({
   extractedTitle,
   extractedKeywords,
   outputVideoUrl,
+  userId,
   onBack
 }: PublishCopyScreenProps) {
   const [videoText, setVideoText] = useState(initialVideoText);
@@ -41,11 +51,33 @@ export default function PublishCopyScreen({
   } | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
+  
+  // 视频号账号相关
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [selectedAccount, setSelectedAccount] = useState<number | null>(null);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishError, setPublishError] = useState('');
 
   const platforms = [
     { id: 'xiaohongshu' as Platform, name: '小红书' },
     { id: 'shipinhao' as Platform, name: '视频号' }
   ];
+
+  // 加载视频号账号
+  useEffect(() => {
+    if (userId && platform === 'shipinhao') {
+      fetch(`${API_BASE_URL}/api/channels/accounts?user_id=${userId}`)
+        .then(res => res.json())
+        .then(data => {
+          const normalAccounts = (data.accounts || []).filter((a: Account) => a.status === 'normal');
+          setAccounts(normalAccounts);
+          if (normalAccounts.length > 0) {
+            setSelectedAccount(normalAccounts[0].id);
+          }
+        })
+        .catch(e => console.error('加载账号失败:', e));
+    }
+  }, [userId, platform]);
 
   // 平台特定的提示词
   const platformPrompts: Record<Platform, { name: string; style: string; titleLimit: string; introLimit: string }> = {
@@ -131,16 +163,65 @@ export default function PublishCopyScreen({
     }
   };
 
-  const handlePublish = () => {
+  const handlePublish = async () => {
     if (!generatedCopy) return;
     
-    // 根据平台跳转到对应链接
-    if (platform === 'xiaohongshu') {
-      // 小红书创作者中心
+    if (platform === 'shipinhao') {
+      // 视频号发布 - 调用后端自动填充
+      if (!selectedAccount) {
+        setPublishError('请先选择视频号账号');
+        return;
+      }
+      
+      if (!userId) {
+        setPublishError('用户未登录');
+        return;
+      }
+      
+      setIsPublishing(true);
+      setPublishError('');
+      
+      console.log('[Publish] 开始发布请求:', {
+        user_id: userId,
+        account_id: selectedAccount,
+        video_path: outputVideoUrl,
+        title: generatedCopy.title
+      });
+      
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/channels/publish`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: userId,
+            account_id: selectedAccount,
+            render_id: editId,
+            video_path: outputVideoUrl,
+            title: generatedCopy.title,
+            tags: generatedCopy.hashtags.join(' '),
+            description: generatedCopy.intro
+          })
+        });
+        
+        console.log('[Publish] 响应状态:', response.status);
+        
+        const data = await response.json();
+        console.log('[Publish] 响应数据:', data);
+        
+        if (data.success) {
+          alert('已打开视频号助手发布页面，标题和文案已自动填充，请确认后点击发表');
+        } else {
+          setPublishError(data.error || '发布失败');
+        }
+      } catch (e: any) {
+        console.error('[Publish] 请求异常:', e);
+        setPublishError(e.message || '发布请求失败');
+      } finally {
+        setIsPublishing(false);
+      }
+    } else {
+      // 小红书 - 直接打开链接
       window.open('https://creator.xiaohongshu.com/publish/publish', '_blank');
-    } else if (platform === 'shipinhao') {
-      // 视频号助手
-      window.open('https://channels.weixin.qq.com/platform/post/create', '_blank');
     }
   };
 
@@ -174,6 +255,7 @@ export default function PublishCopyScreen({
                 onClick={() => {
                   setPlatform(p.id);
                   setGeneratedCopy(null);
+                  setPublishError('');
                 }}
                 className={`flex-1 py-3 rounded-lg text-sm font-medium border transition-all ${
                   platform === p.id
@@ -186,6 +268,43 @@ export default function PublishCopyScreen({
             ))}
           </div>
         </div>
+
+        {/* 视频号账号选择 */}
+        {platform === 'shipinhao' && (
+          <div className="px-4 py-4 border-b border-gray-100">
+            <h3 className="text-sm font-medium text-gray-700 mb-3">选择视频号账号</h3>
+            {accounts.length === 0 ? (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                <div className="flex items-center gap-2">
+                  <AlertCircle size={16} className="text-yellow-600" />
+                  <p className="text-sm text-yellow-700">暂无可用账号，请先前往视频号运营页面添加账号</p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {accounts.map(account => (
+                  <button
+                    key={account.id}
+                    onClick={() => setSelectedAccount(account.id)}
+                    className={`w-full flex items-center gap-3 p-3 rounded-lg border transition-all ${
+                      selectedAccount === account.id
+                        ? 'bg-blue-50 border-blue-500'
+                        : 'bg-white border-gray-200'
+                    }`}
+                  >
+                    <div className="w-10 h-10 bg-gray-200 rounded-full flex items-center justify-center">
+                      <Video size={18} className="text-gray-500" />
+                    </div>
+                    <div className="text-left">
+                      <p className="text-sm font-medium text-gray-900">{account.nickname}</p>
+                      <p className="text-xs text-green-600">状态正常</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* 视频文案输入 */}
         <div className="px-4 py-4 border-b border-gray-100">
@@ -248,6 +367,12 @@ export default function PublishCopyScreen({
           </div>
         )}
 
+        {publishError && (
+          <div className="bg-red-50 text-red-600 px-3 py-2 text-sm rounded-lg">
+            {publishError}
+          </div>
+        )}
+
         {!generatedCopy ? (
           <button
             onClick={handleGenerate}
@@ -270,10 +395,15 @@ export default function PublishCopyScreen({
             </button>
             <button
               onClick={handlePublish}
-              className="flex-1 bg-blue-600 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2"
+              disabled={isPublishing || (platform === 'shipinhao' && accounts.length === 0)}
+              className="flex-1 bg-blue-600 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
             >
-              <ExternalLink size={18} />
-              去{currentPlatform?.name}发布
+              {isPublishing ? (
+                <Loader2 size={18} className="animate-spin" />
+              ) : (
+                <ExternalLink size={18} />
+              )}
+              {isPublishing ? '准备中...' : `去${currentPlatform?.name}发布`}
             </button>
           </div>
         )}

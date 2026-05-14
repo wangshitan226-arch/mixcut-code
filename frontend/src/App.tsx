@@ -5,13 +5,14 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
-  Home, Scissors, LayoutGrid, User
+  Home, Scissors, LayoutGrid, User, TrendingUp
 } from 'lucide-react';
 import { UserProvider, useUser } from './contexts/UserContext';
 import HomeScreen from './components/HomeScreen';
 import EditScreen from './components/EditScreen';
 import ResultsScreen from './components/ResultsScreen';
 import ProfileScreen from './components/ProfileScreen';
+import ChannelsScreen from './components/ChannelsScreen';
 import KaipaiEditor from './components/KaipaiEditor';
 import TestClientRendering from './components/TestClientRendering';
 import ASRComparisonTest from './components/ASRComparisonTest';
@@ -54,7 +55,7 @@ export default function App() {
 }
 
 function AppContent() {
-  const [mainTab, setMainTab] = useState<'home' | 'edit' | 'results' | 'profile' | 'test' | 'asr-test'>('home');
+  const [mainTab, setMainTab] = useState<'home' | 'edit' | 'results' | 'channels' | 'profile' | 'test' | 'asr-test'>('home');
   const { user, isLoading: userLoading, setOnLogoutCallback } = useUser();
   const [shots, setShots] = useState<Shot[]>([]);
   const [combinations, setCombinations] = useState<Combination[]>([]);
@@ -309,6 +310,9 @@ function AppContent() {
             defaultQuality={selectedQuality}
           />
         )}
+        {mainTab === 'channels' && user?.id && (
+          <ChannelsScreen userId={user.id} onBack={() => setMainTab('results')} />
+        )}
         {mainTab === 'profile' && (
           <ProfileScreen onNavigate={(tab) => setMainTab(tab as any)} />
         )}
@@ -325,6 +329,7 @@ function AppContent() {
         <KaipaiEditor
           editId={kaipaiEditId}
           videoUrl={kaipaiVideoUrl}
+          userId={user?.id}
           onBack={handleCloseKaipaiEditor}
           onSave={handleCloseKaipaiEditor}
         />
@@ -352,6 +357,13 @@ function AppContent() {
         >
           <LayoutGrid size={24} className={mainTab === 'results' ? 'fill-blue-100' : ''} />
           <span className="text-[10px] font-medium">作品结果</span>
+        </button>
+        <button 
+          onClick={() => setMainTab('channels')}
+          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'channels' ? 'text-blue-600' : 'text-gray-400'}`}
+        >
+          <TrendingUp size={24} className={mainTab === 'channels' ? 'fill-blue-100' : ''} />
+          <span className="text-[10px] font-medium">运营</span>
         </button>
         <button 
           onClick={() => setMainTab('profile')}

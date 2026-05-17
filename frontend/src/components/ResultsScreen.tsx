@@ -45,10 +45,20 @@ interface ResultItem {
   materials: Material[];
   preview_status: 'pending' | 'processing' | 'completed' | 'failed';
   preview_url?: string;
-  server_video_url?: string; // 视频①：服务器高质量拼接视频URL
+  server_video_url?: string;
+  videoType?: 'mixcut' | 'digital_human' | 'real_human_cut';
 }
 
 const FILTERS = ['全部', '完全不重复', '极低重复率', '普通'];
+
+const TYPE_TABS = [
+  { id: 'all', label: '全部' },
+  { id: 'mixcut', label: '混剪' },
+  { id: 'digital_human', label: '数字人' },
+  { id: 'real_human_cut', label: '口播' },
+] as const;
+
+type TypeTabId = typeof TYPE_TABS[number]['id'];
 
 interface ResultsScreenProps {
   onBack: () => void;
@@ -63,6 +73,7 @@ export default function ResultsScreen({
 }: ResultsScreenProps) {
   const [results, setResults] = useState<ResultItem[]>([]);
   const [activeFilter, setActiveFilter] = useState(FILTERS[0]);
+  const [activeTypeTab, setActiveTypeTab] = useState<TypeTabId>('all');
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [previewProgress, setPreviewProgress] = useState({ completed: 0, total: 0 });
@@ -154,7 +165,8 @@ export default function ResultsScreen({
         thumbnail: combo.thumbnail,
         materials: combo.materials,
         preview_status: combo.preview_status || 'pending',
-        preview_url: combo.preview_url
+        preview_url: combo.preview_url,
+        videoType: 'mixcut' as const,
       }));
       setResults(items);
       setPreviewProgress({ completed: 0, total: items.length });
@@ -1352,9 +1364,19 @@ export default function ResultsScreen({
     }
   };
 
-  const filteredResults = activeFilter === '全部' 
-    ? results 
-    : results.filter(r => r.tag === activeFilter);
+  const filteredResults = (() => {
+    let filtered = activeFilter === '全部' 
+      ? results 
+      : results.filter(r => r.tag === activeFilter);
+    if (activeTypeTab !== 'all') {
+      if (activeTypeTab === 'digital_human') {
+        filtered = filtered.filter(r => r.videoType === 'digital_human');
+      } else {
+        filtered = filtered.filter(r => r.videoType === activeTypeTab);
+      }
+    }
+    return filtered;
+  })();
 
   const getTagColor = (tag: string) => {
     switch (tag) {
@@ -1381,10 +1403,9 @@ export default function ResultsScreen({
           <button onClick={onBack} className="p-1 -ml-1 text-gray-700 active:bg-gray-100 rounded-full transition-colors">
             <ChevronLeft size={24} />
           </button>
-          <h1 className="font-semibold text-gray-900 text-base">混剪结果</h1>
+          <h1 className="font-semibold text-gray-900 text-base">我的作品</h1>
         </div>
         <div className="flex items-center gap-2">
-          {/* 客户端渲染状态指示 */}
           {clientRenderState.isEnabled && (
             <span className="flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full">
               <Cpu size={10} />
@@ -1406,6 +1427,25 @@ export default function ResultsScreen({
           </div>
         </div>
       </header>
+
+      {/* Type Tabs */}
+      <div className="bg-white border-b border-gray-100">
+        <div className="flex gap-1 px-3 py-2 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+          {TYPE_TABS.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTypeTab(tab.id)}
+              className={`whitespace-nowrap px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                activeTypeTab === tab.id
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-600'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* 客户端渲染面板 */}
       {showClientRenderPanel && (
@@ -1472,7 +1512,16 @@ export default function ResultsScreen({
         {results.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-gray-400">
             <Clock size={48} className="mb-4 opacity-50" />
-            <p className="text-sm">暂无混剪结果</p>
+            <p className="text-sm">暂无作品</p>
+          </div>
+        ) : filteredResults.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-gray-400">
+            <Clock size={48} className="mb-4 opacity-50" />
+            <p className="text-sm">
+              {activeTypeTab === 'digital_human' ? '暂无数字人类型作品' :
+               activeTypeTab === 'real_human_cut' ? '暂无口播类型作品' :
+               activeTypeTab === 'mixcut' ? '暂无混剪类型作品' : '暂无作品'}
+            </p>
           </div>
         ) : (
           <div className="grid grid-cols-4 gap-2">
@@ -1552,8 +1601,13 @@ export default function ResultsScreen({
                           )}
                         </div>
 
-                        {/* Tag */}
-                        <div className="absolute top-1 right-1">
+                        {/* Tag & Type */}
+                        <div className="absolute top-1 right-1 flex gap-1">
+                          {item.videoType && item.videoType !== 'mixcut' && (
+                            <span className="text-[9px] px-1 py-0.5 rounded text-white font-medium bg-blue-500">
+                              {item.videoType === 'digital_human' ? '数字人' : item.videoType === 'real_human_cut' ? '口播' : item.videoType}
+                            </span>
+                          )}
                           <span className={`text-[9px] px-1 py-0.5 rounded text-white font-medium ${getTagColor(item.tag)}`}>
                             {item.tag}
                           </span>

@@ -59,7 +59,7 @@ from extensions import db
 from websocket import socketio, init_websocket
 
 # Import models to ensure they are registered with SQLAlchemy
-from models import User, Shot, Material, Render, KaipaiEdit
+from models import User, Shot, Material, Render, KaipaiEdit, DigitalHuman, VoiceClone
 
 # Import blueprints
 from routes import (
@@ -73,7 +73,9 @@ from routes import (
     static_bp,
     kaipai_bp,
     oss_upload_bp,
-    channels_bp
+    channels_bp,
+    ai_bp,
+    digital_human_bp
 )
 
 
@@ -148,6 +150,8 @@ def create_app():
     app.register_blueprint(static_bp)
     app.register_blueprint(oss_upload_bp)
     app.register_blueprint(channels_bp)  # 视频号运营路由
+    app.register_blueprint(ai_bp)  # AI文案路由
+    app.register_blueprint(digital_human_bp)  # 数字人和声音克隆路由
     
     @app.errorhandler(Exception)
     def handle_all_exceptions(e):

@@ -169,19 +169,10 @@ export async function uploadToOSS(
 ): Promise<{ url: string; success: boolean }> {
   console.log('[Export] 上传到 OSS:', filename, `(${(blob.size / 1024 / 1024).toFixed(2)}MB)`);
 
-  // 模拟上传进度
-  for (let i = 0; i <= 100; i += 10) {
-    onProgress?.(i);
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-
-  // 模拟返回 URL
-  const mockUrl = `https://mixcut-oss.example.com/exports/${filename}`;
-
-  return {
-    url: mockUrl,
-    success: true,
-  };
+  const { uploadToOSSDirect } = await import('./ossUpload');
+  const userId = localStorage.getItem('mixcut_user_id') || 'anonymous';
+  const result = await uploadToOSSDirect(blob, filename, userId, onProgress);
+  return result;
 }
 
 // 兼容性导出（供旧组件使用）

@@ -426,3 +426,77 @@ class ChannelsComment(db.Model):
             'commented_at': self.commented_at.isoformat() if self.commented_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class DigitalHuman(db.Model):
+    __tablename__ = 'digital_humans'
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
+
+    title = db.Column(db.String(100), nullable=False)
+    avatar_id = db.Column(db.String(200), nullable=True)
+    video_url = db.Column(db.String(500), nullable=True)
+    cover_url = db.Column(db.String(500), nullable=True)
+    voice_id = db.Column(db.String(200), nullable=True)
+    voice_name = db.Column(db.String(100), nullable=True)
+
+    status = db.Column(db.String(20), default='draft')
+
+    created_at = db.Column(db.DateTime, default=db.func.now())
+    updated_at = db.Column(db.DateTime, default=db.func.now(), onupdate=db.func.now())
+
+    user = db.relationship('User', backref='digital_humans', lazy=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'title': self.title,
+            'avatar_id': self.avatar_id,
+            'video_url': self.video_url,
+            'cover_url': self.cover_url,
+            'voice_id': self.voice_id,
+            'voice_name': self.voice_name,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class VoiceClone(db.Model):
+    __tablename__ = 'voice_clones'
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=False)
+
+    title = db.Column(db.String(100), nullable=False)
+    audio_url = db.Column(db.String(500), nullable=True)
+    clone_voice_id = db.Column(db.String(200), nullable=True)
+    clone_task_id = db.Column(db.String(200), nullable=True)
+    model_type = db.Column(db.String(50), default='cosyvoice-clone-v1')
+    ref_text = db.Column(db.String(500), nullable=True)
+    preview_url = db.Column(db.String(500), nullable=True)
+
+    status = db.Column(db.String(20), default='draft')
+
+    created_at = db.Column(db.DateTime, default=db.func.now())
+    updated_at = db.Column(db.DateTime, default=db.func.now(), onupdate=db.func.now())
+
+    user = db.relationship('User', backref='voice_clones', lazy=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'title': self.title,
+            'audio_url': self.audio_url,
+            'clone_voice_id': self.clone_voice_id,
+            'clone_task_id': self.clone_task_id,
+            'model_type': self.model_type,
+            'ref_text': self.ref_text,
+            'preview_url': self.preview_url,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }

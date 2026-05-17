@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
-  Home, Scissors, LayoutGrid, User, TrendingUp
+  Home, Scissors, LayoutGrid, User, TrendingUp, Plus
 } from 'lucide-react';
 import { UserProvider, useUser } from './contexts/UserContext';
 import HomeScreen from './components/HomeScreen';
@@ -16,6 +16,13 @@ import ChannelsScreen from './components/ChannelsScreen';
 import KaipaiEditor from './components/KaipaiEditor';
 import TestClientRendering from './components/TestClientRendering';
 import ASRComparisonTest from './components/ASRComparisonTest';
+import VideoTypeSelectScreen from './components/VideoTypeSelectScreen';
+import VideoConfigScreen from './components/VideoConfigScreen';
+import DigitalHumanScreen from './components/DigitalHumanScreen';
+import CoverGenerator from './components/CoverGenerator';
+import AICopyScreen from './components/AICopyScreen';
+import AudioRecordScreen from './components/AudioRecordScreen';
+import type { VideoType } from './components/VideoTypeSelectScreen';
 
 const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
 
@@ -55,7 +62,7 @@ export default function App() {
 }
 
 function AppContent() {
-  const [mainTab, setMainTab] = useState<'home' | 'edit' | 'results' | 'channels' | 'profile' | 'test' | 'asr-test'>('home');
+  const [mainTab, setMainTab] = useState<'home' | 'edit' | 'results' | 'channels' | 'profile' | 'test' | 'asr-test' | 'video-type-select' | 'video-config' | 'digital-human' | 'ai-copy' | 'audio-record'>('home');
   const { user, isLoading: userLoading, setOnLogoutCallback } = useUser();
   const [shots, setShots] = useState<Shot[]>([]);
   const [combinations, setCombinations] = useState<Combination[]>([]);
@@ -66,6 +73,17 @@ function AppContent() {
   const [showKaipaiEditor, setShowKaipaiEditor] = useState(false);
   const [kaipaiEditId, setKaipaiEditId] = useState<string>('');
   const [kaipaiVideoUrl, setKaipaiVideoUrl] = useState<string>('');
+
+  // Video type & config state
+  const [selectedVideoType, setSelectedVideoType] = useState<VideoType>('digital_human_mix');
+
+  // Cover Generator state
+  const [showCoverGenerator, setShowCoverGenerator] = useState(false);
+  const [coverEditId, setCoverEditId] = useState('');
+  const [coverVideoUrl, setCoverVideoUrl] = useState('');
+  const [coverOriginalVideoUrl, setCoverOriginalVideoUrl] = useState('');
+  const [coverVideoText, setCoverVideoText] = useState('');
+  const [coverExtractedTitle, setCoverExtractedTitle] = useState('');
 
   // Set up logout callback to clear app state
   useEffect(() => {
@@ -281,7 +299,22 @@ function AppContent() {
     <div className="h-[100dvh] w-full bg-gray-50 overflow-hidden flex flex-col relative">
       {/* Dynamic Content based on Main Tab */}
       <div className="flex-1 overflow-hidden flex flex-col">
-        {mainTab === 'home' && <HomeScreen onNavigate={() => setMainTab('edit')} userId={user?.id} />}
+        {mainTab === 'home' && <HomeScreen 
+          onNavigate={() => setMainTab('edit')} 
+          onSelectVideoType={() => setMainTab('video-type-select')}
+          onOpenDigitalHuman={() => setMainTab('digital-human')}
+          onOpenAICopy={() => setMainTab('ai-copy')}
+          onOpenAudioRecord={() => setMainTab('audio-record')}
+          onOpenCoverGenerator={(editId, videoUrl, originalVideoUrl, videoText, extractedTitle) => {
+            setCoverEditId(editId);
+            setCoverVideoUrl(videoUrl);
+            setCoverOriginalVideoUrl(originalVideoUrl);
+            setCoverVideoText(videoText);
+            setCoverExtractedTitle(extractedTitle);
+            setShowCoverGenerator(true);
+          }}
+          userId={user?.id} 
+        />}
         {mainTab === 'edit' && user?.id && (
           <EditScreen 
             userId={user.id}
@@ -335,61 +368,125 @@ function AppContent() {
         />
       )}
 
+      {/* Video Type Select Overlay */}
+      {mainTab === 'video-type-select' && (
+        <div className="fixed inset-0 z-[100] bg-gray-50">
+          <VideoTypeSelectScreen
+            onBack={() => setMainTab('home')}
+            onSelectType={(type) => {
+              if (type === 'mixcut') {
+                setMainTab('edit');
+              } else {
+                setSelectedVideoType(type);
+                setMainTab('video-config');
+              }
+            }}
+          />
+        </div>
+      )}
+
+      {/* Video Config Overlay */}
+      {mainTab === 'video-config' && (
+        <div className="fixed inset-0 z-[100] bg-gray-50">
+          <VideoConfigScreen
+            videoType={selectedVideoType}
+            onBack={() => setMainTab('video-type-select')}
+            onOpenDigitalHuman={() => setMainTab('digital-human')}
+            onGenerate={(config) => {
+              console.log('Generating video with config:', config);
+              setMainTab('home');
+            }}
+            onGoToMixcut={() => setMainTab('edit')}
+          />
+        </div>
+      )}
+
+      {/* Digital Human Overlay */}
+      {mainTab === 'digital-human' && (
+        <div className="fixed inset-0 z-[100] bg-gray-50">
+          <DigitalHumanScreen
+            onBack={() => setMainTab('home')}
+          />
+        </div>
+      )}
+
+      {/* AI Copy Overlay */}
+      {mainTab === 'ai-copy' && (
+        <div className="fixed inset-0 z-[100] bg-gray-50">
+          <AICopyScreen
+            onBack={() => setMainTab('home')}
+          />
+        </div>
+      )}
+
+      {/* Audio Record Overlay */}
+      {mainTab === 'audio-record' && (
+        <div className="fixed inset-0 z-[100] bg-gray-50">
+          <AudioRecordScreen
+            onBack={() => setMainTab('home')}
+            onVoiceCreated={() => setMainTab('home')}
+          />
+        </div>
+      )}
+
+      {/* Cover Generator Overlay */}
+      {showCoverGenerator && coverEditId && (
+        <CoverGenerator
+          editId={coverEditId}
+          videoUrl={coverVideoUrl}
+          originalVideoUrl={coverOriginalVideoUrl}
+          videoText={coverVideoText}
+          extractedTitle={coverExtractedTitle}
+          onBack={() => {
+            setShowCoverGenerator(false);
+            setCoverEditId('');
+            setCoverVideoUrl('');
+            setCoverOriginalVideoUrl('');
+            setCoverVideoText('');
+            setCoverExtractedTitle('');
+          }}
+        />
+      )}
+
       {/* Bottom Navigation */}
-      <div className="bg-white border-t border-gray-200 flex justify-around items-center pb-[env(safe-area-inset-bottom)] pt-2 px-2 h-16 shrink-0 z-50">
+      <div className="bg-white border-t border-gray-200 flex justify-around items-end pb-[env(safe-area-inset-bottom)] px-2 h-16 shrink-0 z-50">
         <button 
           onClick={() => setMainTab('home')}
-          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'home' ? 'text-blue-600' : 'text-gray-400'}`}
+          className={`flex flex-col items-center justify-center flex-1 h-full space-y-1 ${mainTab === 'home' ? 'text-blue-600' : 'text-gray-400'}`}
         >
           <Home size={24} className={mainTab === 'home' ? 'fill-blue-100' : ''} />
           <span className="text-[10px] font-medium">首页</span>
         </button>
         <button 
-          onClick={() => setMainTab('edit')}
-          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'edit' ? 'text-blue-600' : 'text-gray-400'}`}
-        >
-          <Scissors size={24} className={mainTab === 'edit' ? 'fill-blue-100' : ''} />
-          <span className="text-[10px] font-medium">智能剪辑</span>
-        </button>
-        <button 
           onClick={() => setMainTab('results')}
-          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'results' ? 'text-blue-600' : 'text-gray-400'}`}
+          className={`flex flex-col items-center justify-center flex-1 h-full space-y-1 ${mainTab === 'results' ? 'text-blue-600' : 'text-gray-400'}`}
         >
           <LayoutGrid size={24} className={mainTab === 'results' ? 'fill-blue-100' : ''} />
-          <span className="text-[10px] font-medium">作品结果</span>
+          <span className="text-[10px] font-medium">作品</span>
+        </button>
+        <button 
+          onClick={() => setMainTab('video-type-select')}
+          className="flex flex-col items-center justify-center flex-1 h-full"
+        >
+          <div className="w-12 h-12 -mt-6 bg-gradient-to-r from-blue-500 to-indigo-600 rounded-full flex items-center justify-center shadow-lg shadow-blue-300 border-4 border-white">
+            <Plus size={24} className="text-white" />
+          </div>
+          <span className="text-[10px] font-medium text-blue-600 -mt-0.5">新建</span>
         </button>
         <button 
           onClick={() => setMainTab('channels')}
-          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'channels' ? 'text-blue-600' : 'text-gray-400'}`}
+          className={`flex flex-col items-center justify-center flex-1 h-full space-y-1 ${mainTab === 'channels' ? 'text-blue-600' : 'text-gray-400'}`}
         >
           <TrendingUp size={24} className={mainTab === 'channels' ? 'fill-blue-100' : ''} />
           <span className="text-[10px] font-medium">运营</span>
         </button>
         <button 
           onClick={() => setMainTab('profile')}
-          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'profile' ? 'text-blue-600' : 'text-gray-400'}`}
+          className={`flex flex-col items-center justify-center flex-1 h-full space-y-1 ${mainTab === 'profile' ? 'text-blue-600' : 'text-gray-400'}`}
         >
           <User size={24} className={mainTab === 'profile' ? 'fill-blue-100' : ''} />
           <span className="text-[10px] font-medium">我的</span>
         </button>
-        {/* <button 
-          onClick={() => setMainTab('test')}
-          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'test' ? 'text-red-600' : 'text-gray-400'}`}
-        >
-          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${mainTab === 'test' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'}`}>
-            测
-          </div>
-          <span className="text-[10px] font-medium">测试</span>
-        </button>
-        <button 
-          onClick={() => setMainTab('asr-test')}
-          className={`flex flex-col items-center justify-center w-full h-full space-y-1 ${mainTab === 'asr-test' ? 'text-purple-600' : 'text-gray-400'}`}
-        >
-          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${mainTab === 'asr-test' ? 'bg-purple-100 text-purple-600' : 'bg-gray-100 text-gray-500'}`}>
-            ASR
-          </div>
-          <span className="text-[10px] font-medium">ASR</span>
-        </button> */}
       </div>
     </div>
   );

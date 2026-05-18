@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.so
@@ -57,8 +57,9 @@ build/
 .DS_Store
 Thumbs.db
 
-
-backend/config.py
+# Environment variables (contain secrets)
+.env
+!.env.example
 
 backend/channels_user_data/
 backend/channels_cookies/

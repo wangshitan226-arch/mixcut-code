@@ -6,7 +6,7 @@ import { processMaterial, ProcessedMaterial } from '../utils/clientMaterialProce
 import { isOPFSSupported, deleteMaterial as deleteMaterialFromOPFS, clearAllStorage as clearOPFSStorage, listMaterials } from '../utils/opfs';
 import { isIndexedDBSupported, deleteMaterialFromIndexedDB, clearAllIndexedDB, getIndexedDBStats } from '../utils/indexedDB';
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 const WS_BASE_URL = API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
 const POLLING_INTERVAL = 200; // 200ms轮询间隔，作为WebSocket的fallback
 

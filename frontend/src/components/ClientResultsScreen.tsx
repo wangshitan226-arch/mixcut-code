@@ -46,7 +46,7 @@ interface ResultItem {
 }
 
 const FILTERS = ['全部', '完全不重复', '极低重复率', '普通'];
-const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 interface ClientResultsScreenProps {
   onBack: () => void;

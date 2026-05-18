@@ -3,7 +3,7 @@
  * 支持客户端直接上传文件到阿里云OSS（使用STS临时签名）
  */
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 export interface STSToken {
   accessid: string;

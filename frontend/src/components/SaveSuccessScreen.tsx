@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ChevronLeft, FileText, ArrowRight, CheckCircle2, Image as ImageIcon } from 'lucide-react';
 import CoverGenerator from './CoverGenerator';
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 interface SaveSuccessScreenProps {
   editId: string;

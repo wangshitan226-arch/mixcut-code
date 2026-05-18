@@ -36,7 +36,25 @@ export default function OptimizedVideoPlayer({
 
   // 确定最终使用的视频源
   // 优先级：1.传入的Blob URL > 2.本地缓存 > 3.传入的其他URL
-  const finalSrc = localUrl || (videoUrl.startsWith('http') || videoUrl.startsWith('blob:') ? videoUrl : `${apiBaseUrl}${videoUrl}`);
+  // 对于外部OSS URL，使用后端代理避免CORS和连接问题
+  const getProxiedUrl = (url: string): string => {
+    if (url.startsWith('blob:')) return url;
+    if (url.startsWith('http')) {
+      // 检查是否是同域URL
+      try {
+        const urlObj = new URL(url);
+        const apiObj = new URL(apiBaseUrl);
+        if (urlObj.host === apiObj.host) return url;
+      } catch {
+        // URL解析失败，直接使用
+        return url;
+      }
+      // 外部URL使用代理
+      return `${apiBaseUrl}/api/proxy/video?url=${encodeURIComponent(url)}`;
+    }
+    return `${apiBaseUrl}${url}`;
+  };
+  const finalSrc = localUrl || getProxiedUrl(videoUrl);
 
   // 统一的缓存检查逻辑
   const checkIsActuallyCached = useCallback(async (): Promise<boolean> => {

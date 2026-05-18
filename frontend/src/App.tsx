@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
-  Home, Scissors, LayoutGrid, User, TrendingUp, Plus
+  Home, Scissors, LayoutGrid, User, TrendingUp, Plus, Check, AlertCircle, Loader2
 } from 'lucide-react';
 import { UserProvider, useUser } from './contexts/UserContext';
 import HomeScreen from './components/HomeScreen';
@@ -24,7 +24,7 @@ import AICopyScreen from './components/AICopyScreen';
 import AudioRecordScreen from './components/AudioRecordScreen';
 import type { VideoType } from './components/VideoTypeSelectScreen';
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 interface Material {
   id: string;
@@ -76,6 +76,15 @@ function AppContent() {
 
   // Video type & config state
   const [selectedVideoType, setSelectedVideoType] = useState<VideoType>('digital_human_mix');
+
+  // Digital human render state
+  const [renderTaskId, setRenderTaskId] = useState<string | null>(null);
+  const [renderStatus, setRenderStatus] = useState<string>('idle');
+  const [renderProgress, setRenderProgress] = useState(0);
+  const [renderStage, setRenderStage] = useState('');
+  const [renderVideoUrl, setRenderVideoUrl] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
+  const [showChannelsModal, setShowChannelsModal] = useState(false);
 
   // Cover Generator state
   const [showCoverGenerator, setShowCoverGenerator] = useState(false);
@@ -315,6 +324,67 @@ function AppContent() {
           }}
           userId={user?.id} 
         />}
+
+        {renderStatus !== 'idle' && (
+          <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60">
+            <div className="bg-white rounded-2xl p-6 mx-4 max-w-sm w-full shadow-2xl">
+              {renderStatus === 'completed' ? (
+                <div className="text-center">
+                  <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-4">
+                    <Check size={32} className="text-green-500" />
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-900 mb-2">视频生成完成！</h3>
+                  {renderVideoUrl && (
+                    <video src={renderVideoUrl.startsWith('http') && !renderVideoUrl.includes('localhost') && !renderVideoUrl.includes('127.0.0.1') ? `${API_BASE_URL}/api/proxy/video?url=${encodeURIComponent(renderVideoUrl)}` : renderVideoUrl} controls className="w-full rounded-xl mb-4 max-h-[300px]" />
+                  )}
+                  <div className="flex gap-2">
+                    <button onClick={() => { setRenderStatus('idle'); setRenderTaskId(null); }}
+                      className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-medium">
+                      关闭
+                    </button>
+                    {renderVideoUrl && (
+                      <a href={renderVideoUrl.startsWith('http') && !renderVideoUrl.includes('localhost') && !renderVideoUrl.includes('127.0.0.1') ? `${API_BASE_URL}/api/proxy/video?url=${encodeURIComponent(renderVideoUrl)}` : renderVideoUrl} download className="flex-1 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium text-center">
+                        下载视频
+                      </a>
+                    )}
+                  </div>
+                </div>
+              ) : renderStatus === 'failed' ? (
+                <div className="text-center">
+                  <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
+                    <AlertCircle size={32} className="text-red-500" />
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-900 mb-2">生成失败</h3>
+                  <p className="text-sm text-gray-500 mb-4">{renderError || '未知错误'}</p>
+                  <button onClick={() => { setRenderStatus('idle'); setRenderTaskId(null); }}
+                    className="w-full py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-medium">
+                    关闭
+                  </button>
+                </div>
+              ) : (
+                <div className="text-center">
+                  <div className="w-20 h-20 rounded-full bg-blue-100 flex items-center justify-center mx-auto mb-4">
+                    <Loader2 size={36} className="animate-spin text-blue-500" />
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-900 mb-2">正在生成数字人视频</h3>
+                  <p className="text-sm text-gray-500 mb-4">
+                    {renderStage === 'synthesizing' ? '语音合成中...' :
+                     renderStage === 'videoretalk' ? '生成对口型视频...' :
+                     renderStage === 'compositing' ? '合成字幕/音效...' :
+                     renderStage === 'ice_rendering' ? '云端渲染中...' :
+                     '处理中...'}
+                  </p>
+                  <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden mb-2">
+                    <div className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                      style={{ width: `${Math.max(renderProgress, 5)}%` }} />
+                  </div>
+                  <p className="text-xs text-gray-400">{renderProgress}% · 预计需要2-5分钟</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {mainTab === 'edit' && user?.id && (
           <EditScreen 
             userId={user.id}
@@ -392,9 +462,80 @@ function AppContent() {
             videoType={selectedVideoType}
             onBack={() => setMainTab('video-type-select')}
             onOpenDigitalHuman={() => setMainTab('digital-human')}
-            onGenerate={(config) => {
+            onGenerate={async (config) => {
               console.log('Generating video with config:', config);
-              setMainTab('home');
+              if (config.digitalHumanId && config.copyText) {
+                try {
+                  setRenderStatus('submitting');
+                  setRenderProgress(0);
+                  setRenderStage('提交任务...');
+                  setRenderError(null);
+                  setRenderVideoUrl(null);
+                  setMainTab('home');
+
+                  const resp = await fetch(`${API_BASE_URL}/api/digital-human/render`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      user_id: user?.id,
+                      digital_human_id: config.digitalHumanId,
+                      template_id: config.templateId,
+                      text: config.copyText,
+                      voice_id: config.voiceId,
+                      video_type: selectedVideoType,
+                    }),
+                  });
+                  const data = await resp.json();
+                  if (data.success) {
+                    const taskId = data.task_id;
+                    setRenderTaskId(taskId);
+                    setRenderStatus('processing');
+                    setRenderStage('语音合成中...');
+
+                    const pollInterval = setInterval(async () => {
+                      try {
+                        const statusResp = await fetch(`${API_BASE_URL}/api/tasks/${taskId}/status`);
+                        if (statusResp.ok) {
+                          const statusData = await statusResp.json();
+                          setRenderProgress(statusData.progress || 0);
+                          setRenderStage(statusData.stage || '');
+
+                          if (statusData.status === 'completed') {
+                            clearInterval(pollInterval);
+                            setRenderStatus('completed');
+                            setRenderVideoUrl(statusData.video_url);
+                          } else if (statusData.status === 'failed') {
+                            clearInterval(pollInterval);
+                            setRenderStatus('failed');
+                            setRenderError(statusData.error || '渲染失败');
+                          }
+                        } else if (statusResp.status === 404) {
+                          clearInterval(pollInterval);
+                          setRenderStatus('failed');
+                          setRenderError('任务不存在或已过期');
+                        }
+                      } catch (e) {
+                        console.error('Poll render status error:', e);
+                      }
+                    }, 5000);
+
+                    setTimeout(() => {
+                      clearInterval(pollInterval);
+                      if (renderStatus === 'processing') {
+                        setRenderStatus('failed');
+                        setRenderError('渲染超时，请稍后在作品列表中查看');
+                      }
+                    }, 600000);
+                  } else {
+                    setRenderStatus('failed');
+                    setRenderError(data.error || '提交任务失败');
+                  }
+                } catch (e) {
+                  console.error('Digital human render error:', e);
+                  setRenderStatus('failed');
+                  setRenderError('网络错误');
+                }
+              }
             }}
             onGoToMixcut={() => setMainTab('edit')}
           />
@@ -474,7 +615,9 @@ function AppContent() {
           <span className="text-[10px] font-medium text-blue-600 -mt-0.5">新建</span>
         </button>
         <button 
-          onClick={() => setMainTab('channels')}
+          onClick={() => {
+            setShowChannelsModal(true);
+          }}
           className={`flex flex-col items-center justify-center flex-1 h-full space-y-1 ${mainTab === 'channels' ? 'text-blue-600' : 'text-gray-400'}`}
         >
           <TrendingUp size={24} className={mainTab === 'channels' ? 'fill-blue-100' : ''} />
@@ -488,6 +631,29 @@ function AppContent() {
           <span className="text-[10px] font-medium">我的</span>
         </button>
       </div>
+
+      {showChannelsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowChannelsModal(false)}>
+          <div className="bg-white rounded-2xl p-6 mx-6 max-w-sm w-full shadow-xl" onClick={e => e.stopPropagation()}>
+            <div className="flex flex-col items-center text-center">
+              <div className="w-14 h-14 bg-amber-100 rounded-full flex items-center justify-center mb-4">
+                <TrendingUp size={28} className="text-amber-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">功能暂未开放</h3>
+              <p className="text-sm text-gray-500 mb-6 leading-relaxed">
+                视频号运营功能需要本地部署后方可使用。<br />
+                请联系管理员获取本地部署方案。
+              </p>
+              <button
+                onClick={() => setShowChannelsModal(false)}
+                className="w-full py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition-colors"
+              >
+                我知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

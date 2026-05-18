@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import json
 import time
@@ -8,6 +9,8 @@ import threading
 from flask import Blueprint, request, jsonify, current_app
 from extensions import db
 from models import DigitalHuman, VoiceClone
+from utils.videoretalk import videoretalk_tool
+from utils.oss import oss_client
 
 digital_human_bp = Blueprint('digital_human', __name__, url_prefix='/api')
 logger = logging.getLogger(__name__)
@@ -17,6 +20,67 @@ DASHSCOPE_CUSTOMIZATION_URL = 'https://dashscope.aliyuncs.com/api/v1/services/au
 DASHSCOPE_TTS_URL = 'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer'
 
 CLONE_REF_TEXT = '你好，我是你的专属AI克隆声音。I am your exclusive AI clone voice.'
+
+SYSTEM_VOICES = [
+    {"id": "longxiaocheng_v2", "name": "龙小诚", "gender": "male", "style": "沉稳男声", "scenario": "有声阅读"},
+    {"id": "longxiaochun_v2", "name": "龙小春", "gender": "female", "style": "温柔女声", "scenario": "有声阅读"},
+    {"id": "longlaotie_v2", "name": "龙老铁", "gender": "male", "style": "东北老铁", "scenario": "短视频配音"},
+    {"id": "longshuo_v2", "name": "龙硕", "gender": "male", "style": "磁性男声", "scenario": "有声阅读"},
+    {"id": "longyue_v2", "name": "龙悦", "gender": "female", "style": "温柔女声", "scenario": "有声阅读"},
+    {"id": "longfei_v2", "name": "龙飞", "gender": "male", "style": "激情男声", "scenario": "有声阅读"},
+    {"id": "longjielidou_v2", "name": "龙杰力豆", "gender": "male", "style": "活泼男童", "scenario": "童声"},
+    {"id": "longshuoer_v2", "name": "龙硕尔", "gender": "female", "style": "温柔女童", "scenario": "童声"},
+    {"id": "longyingxiao_v2", "name": "龙盈笑", "gender": "female", "style": "甜美销售", "scenario": "电话销售"},
+    {"id": "longjiqi_v2", "name": "龙机七", "gender": "neutral", "style": "呆萌机器人", "scenario": "短视频配音"},
+    {"id": "longhouge_v2", "name": "龙猴哥", "gender": "male", "style": "经典猴王", "scenario": "短视频配音"},
+    {"id": "longjixin_v2", "name": "龙吉星", "gender": "female", "style": "尖酸刻薄女", "scenario": "短视频配音"},
+    {"id": "longdaiyu_v2", "name": "龙黛玉", "gender": "female", "style": "柔弱才女", "scenario": "短视频配音"},
+    {"id": "longgaoseng_v2", "name": "龙高僧", "gender": "male", "style": "悟道高僧", "scenario": "短视频配音"},
+    {"id": "longanli_v2", "name": "龙安理", "gender": "female", "style": "干练女声", "scenario": "语音助手"},
+    {"id": "longanlang_v2", "name": "龙安朗", "gender": "male", "style": "清新男声", "scenario": "语音助手"},
+    {"id": "longxiaobai_v2", "name": "龙小白", "gender": "female", "style": "亲切女声", "scenario": "客服"},
+    {"id": "longxiaoye_v2", "name": "龙小野", "gender": "male", "style": "低沉男声", "scenario": "有声阅读"},
+    {"id": "longwan_v2", "name": "龙婉", "gender": "female", "style": "知性女声", "scenario": "新闻播报"},
+    {"id": "longcheng_v2", "name": "龙诚", "gender": "male", "style": "浑厚男声", "scenario": "新闻播报"},
+    {"id": "longmiao_v2", "name": "龙淼", "gender": "female", "style": "温柔女声", "scenario": "情感电台"},
+    {"id": "longjing_v2", "name": "龙晶", "gender": "female", "style": "清亮女声", "scenario": "语音助手"},
+    {"id": "longhua_v2", "name": "龙华", "gender": "male", "style": "大气男声", "scenario": "纪录片"},
+    {"id": "longxiaomo_v2", "name": "龙小墨", "gender": "male", "style": "低沉男声", "scenario": "有声阅读"},
+]
+
+
+@digital_human_bp.route('/system-voices', methods=['GET'])
+def get_system_voices():
+    """获取阿里云系统语音列表"""
+    scenario = request.args.get('scenario')
+    gender = request.args.get('gender')
+    voices = SYSTEM_VOICES
+    if scenario:
+        voices = [v for v in voices if v['scenario'] == scenario]
+    if gender:
+        voices = [v for v in voices if v['gender'] == gender]
+    return jsonify({'voices': voices})
+
+
+@digital_human_bp.route('/system-voices/preview', methods=['POST'])
+def preview_system_voice():
+    """试听系统语音"""
+    try:
+        data = request.get_json(silent=True) or {}
+        voice_id = data.get('voice_id', '')
+        text = data.get('text', '你好，这是系统语音试听效果。')
+
+        if not voice_id:
+            return jsonify({'error': '请指定语音ID'}), 400
+
+        audio_url = _synthesize_speech(text, voice_id, 'cosyvoice-v2')
+        if audio_url:
+            return jsonify({'success': True, 'audio_url': audio_url})
+        else:
+            return jsonify({'error': '语音合成失败'}), 500
+    except Exception as e:
+        logger.error(f"[SystemVoice] 试听异常: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @digital_human_bp.route('/users/<user_id>/digital-humans', methods=['GET'])
@@ -55,13 +119,10 @@ def create_digital_human():
             cover_url=cover_url,
             voice_id=voice_id,
             voice_name=voice_name,
-            status='draft',
+            status='ready' if video_url else 'draft',
         )
         db.session.add(dh)
         db.session.commit()
-
-        if video_url:
-            _start_avatar_training(dh.id, title, video_url, cover_url)
 
         logger.info(f"[DigitalHuman] Created: id={dh.id}, status={dh.status}")
         return jsonify(dh.to_dict()), 201
@@ -79,6 +140,8 @@ def get_digital_human(dh_id):
             return jsonify({'error': '数字人不存在'}), 404
         if dh.status == 'training' and dh.avatar_id:
             _check_avatar_status(dh)
+        if dh.videoretalk_status in ('processing', 'submitted') and dh.videoretalk_task_id:
+            _check_videoretalk_status(dh)
         return jsonify(dh.to_dict())
     except Exception as e:
         logger.error(f"[DigitalHuman] Get error: {e}")
@@ -103,7 +166,7 @@ def update_digital_human(dh_id):
         if 'voice_name' in data:
             dh.voice_name = data['voice_name']
         if data.get('video_url') and dh.status == 'draft':
-            _start_avatar_training(dh.id, dh.title, dh.video_url, dh.cover_url)
+            dh.status = 'ready'
         db.session.commit()
         return jsonify(dh.to_dict())
     except Exception as e:
@@ -125,6 +188,451 @@ def delete_digital_human(dh_id):
         return jsonify({'error': str(e)}), 500
 
 
+# ==================== VideoRetalk 对口型生成 ====================
+
+@digital_human_bp.route('/digital-humans/<dh_id>/generate', methods=['POST'])
+def generate_avatar_video(dh_id):
+    """
+    提交数字人对口型视频生成任务
+
+    流程:
+    1. 使用 DashScope TTS 将文本合成为音频
+    2. 使用 VideoRetalk 将模板视频驱动音频生成对口型视频
+    3. 下载生成的视频并上传到OSS
+
+    请求体:?
+    {
+        "text": "要合成的文本",
+        "voice_id": "可选，覆盖数字人默认声音",
+        "video_extension": false
+    }
+    """
+    try:
+        dh = DigitalHuman.query.get(dh_id)
+        if not dh:
+            return jsonify({'error': '数字人不存在'}), 404
+
+        if not dh.video_url:
+            return jsonify({'error': '数字人未设置模板视频，无法生成对口型视频'}), 400
+
+        data = request.get_json(silent=True) or {}
+        text = data.get('text', '').strip()
+        voice_id = data.get('voice_id', dh.voice_id)
+        video_extension = data.get('video_extension', False)
+
+        if not text:
+            return jsonify({'error': '请输入要合成的文本'}), 400
+
+        if not voice_id:
+            return jsonify({'error': '数字人未设置声音，请先选择声音'}), 400
+
+        if dh.videoretalk_status in ('processing', 'submitted'):
+            return jsonify({
+                'error': '已有生成任务进行中',
+                'task_id': dh.videoretalk_task_id,
+                'status': dh.videoretalk_status
+            }), 409
+
+        dh.videoretalk_status = 'synthesizing'
+        db.session.commit()
+
+        app = current_app._get_current_object()
+
+        def _generate_pipeline():
+            with app.app_context():
+                try:
+                    dh_obj = DigitalHuman.query.get(dh_id)
+                    if not dh_obj:
+                        return
+
+                    logger.info(f"[VideoRetalk] 开始生成管线 dh={dh_id}, text={text[:30]}...")
+
+                    audio_url = _synthesize_speech(text, voice_id)
+                    if not audio_url:
+                        logger.error(f"[VideoRetalk] TTS合成失败: dh={dh_id}")
+                        dh_obj = DigitalHuman.query.get(dh_id)
+                        if dh_obj:
+                            dh_obj.videoretalk_status = 'failed'
+                            db.session.commit()
+                        return
+
+                    logger.info(f"[VideoRetalk] TTS合成成功: {audio_url[:80]}...")
+
+                    dh_obj = DigitalHuman.query.get(dh_id)
+                    if not dh_obj:
+                        return
+                    dh_obj.videoretalk_status = 'submitted'
+
+                    result = videoretalk_tool.submit_task(
+                        video_url=dh_obj.video_url,
+                        audio_url=audio_url,
+                        video_extension=video_extension
+                    )
+
+                    if not result.get('success'):
+                        error_msg = result.get('error', '提交任务失败')
+                        logger.error(f"[VideoRetalk] 提交任务失败: {error_msg}")
+                        dh_obj = DigitalHuman.query.get(dh_id)
+                        if dh_obj:
+                            dh_obj.videoretalk_status = 'failed'
+                            db.session.commit()
+                        return
+
+                    task_id = result.get('task_id')
+                    logger.info(f"[VideoRetalk] 任务已提交 task_id={task_id}")
+
+                    dh_obj = DigitalHuman.query.get(dh_id)
+                    if dh_obj:
+                        dh_obj.videoretalk_task_id = task_id
+                        dh_obj.videoretalk_status = 'processing'
+                        db.session.commit()
+
+                    _poll_videoretalk_task(app, dh_id, task_id, dh_obj.user_id)
+
+                except Exception as e:
+                    logger.error(f"[VideoRetalk] 生成管线异常: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    try:
+                        dh_obj = DigitalHuman.query.get(dh_id)
+                        if dh_obj:
+                            dh_obj.videoretalk_status = 'failed'
+                            db.session.commit()
+                    except Exception:
+                        pass
+
+        t = threading.Thread(target=_generate_pipeline, daemon=True)
+        t.start()
+
+        return jsonify({
+            'success': True,
+            'message': '数字人视频生成任务已提交',
+            'dh_id': dh_id,
+            'status': 'synthesizing'
+        })
+
+    except Exception as e:
+        logger.error(f"[VideoRetalk] 生成请求异常: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@digital_human_bp.route('/digital-humans/<dh_id>/generate/status', methods=['GET'])
+def get_generate_status(dh_id):
+    """查询数字人视频生成任务状态"""
+    try:
+        dh = DigitalHuman.query.get(dh_id)
+        if not dh:
+            return jsonify({'error': '数字人不存在'}), 404
+
+        if dh.videoretalk_status in ('processing', 'submitted') and dh.videoretalk_task_id:
+            _check_videoretalk_status(dh)
+
+        return jsonify({
+            'dh_id': dh_id,
+            'videoretalk_status': dh.videoretalk_status,
+            'videoretalk_task_id': dh.videoretalk_task_id,
+            'generated_video_url': dh.generated_video_url,
+            'generated_video_duration': dh.generated_video_duration,
+        })
+    except Exception as e:
+        logger.error(f"[VideoRetalk] 查询状态异常 {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@digital_human_bp.route('/digital-humans/<dh_id>/generate', methods=['DELETE'])
+def cancel_generate(dh_id):
+    """取消/重置数字人视频生成任务"""
+    try:
+        dh = DigitalHuman.query.get(dh_id)
+        if not dh:
+            return jsonify({'error': '数字人不存在'}), 404
+
+        dh.videoretalk_status = 'idle'
+        dh.videoretalk_task_id = None
+        db.session.commit()
+
+        return jsonify({'message': '已重置生成状态', 'videoretalk_status': 'idle'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== 语音合成 (TTS) ====================
+
+@digital_human_bp.route('/digital-humans/tts', methods=['POST'])
+def text_to_speech():
+    """
+    独立的TTS接口 - 将文本合成为语音
+
+    请求体:?
+    {
+        "text": "要合成的文本",
+        "voice_id": "声音ID",
+        "model": "cosyvoice-v2"  // 可选
+    }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        text = data.get('text', '').strip()
+        voice_id = data.get('voice_id', '')
+        target_model = data.get('model', 'cosyvoice-v2')
+
+        if not text:
+            return jsonify({'error': '请输入要合成的文本'}), 400
+        if not voice_id:
+            return jsonify({'error': '请指定声音ID'}), 400
+
+        audio_url = _synthesize_speech(text, voice_id, target_model)
+
+        if audio_url:
+            return jsonify({'success': True, 'audio_url': audio_url})
+        else:
+            return jsonify({'error': '语音合成失败'}), 500
+
+    except Exception as e:
+        logger.error(f"[TTS] 语音合成异常: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+def _synthesize_speech(text: str, voice_id: str, target_model: str = 'cosyvoice-v2') -> str:
+    """
+    使用 DashScope CosyVoice TTS 将文本合成为语音
+
+    API: POST https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer
+    文档: https://help.aliyun.com/zh/model-studio/non-realtime-cosyvoice-api
+
+    Returns:
+        音频URL，失败返回None
+    """
+    max_length = 500
+    if len(text) > max_length:
+        text = text[:max_length] + "..."
+        logger.warning(f"[TTS] 文本超过{max_length}字，已截断")
+
+    headers = {
+        'Authorization': f'Bearer {DASHSCOPE_API_KEY}',
+        'Content-Type': 'application/json',
+    }
+    payload = {
+        'model': target_model,
+        'input': {
+            'text': text,
+            'voice': voice_id,
+            'format': 'mp3',
+            'sample_rate': 22050,
+        },
+    }
+
+    try:
+        logger.info(f"[TTS] 合成语音: voice={voice_id}, model={target_model}, text={text[:30]}...")
+
+        resp = requests.post(DASHSCOPE_TTS_URL, headers=headers, json=payload, timeout=60)
+
+        if resp.status_code != 200:
+            logger.error(f"[TTS] 合成失败: status={resp.status_code}, body={resp.text[:300]}")
+            return None
+
+        content_type = resp.headers.get('Content-Type', '')
+
+        if 'audio' in content_type or (len(resp.content) > 1000 and not resp.text.strip().startswith('{')):
+            temp_dir = os.path.join(os.path.dirname(__file__), '..', 'tmp')
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_path = os.path.join(temp_dir, f"tts_{uuid.uuid4().hex[:8]}_{int(time.time())}.mp3")
+            with open(temp_path, 'wb') as f:
+                f.write(resp.content)
+
+            logger.info(f"[TTS] 音频已保存到本地: {temp_path}, 大小={len(resp.content)} bytes")
+
+            try:
+                from utils.oss import oss_client
+                if oss_client.enabled:
+                    oss_key = f"tts/{uuid.uuid4().hex[:8]}_{int(time.time())}.mp3"
+                    oss_client.bucket.put_object(oss_key, resp.content)
+                    if oss_client.cdn_domain:
+                        audio_url = f"https://{oss_client.cdn_domain}/{oss_key}"
+                    else:
+                        audio_url = f"https://{oss_client.bucket_name}.{oss_client.endpoint}/{oss_key}"
+                    logger.info(f"[TTS] 音频已上传OSS: {audio_url}")
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                    return audio_url
+            except Exception as e:
+                logger.error(f"[TTS] OSS上传失败: {e}")
+
+            return f"file://{temp_path}"
+
+        try:
+            result = resp.json()
+        except Exception:
+            result = {}
+
+        audio_url = None
+        if isinstance(result, dict):
+            output = result.get('output', {})
+            if isinstance(output, dict):
+                if 'audio' in output and isinstance(output['audio'], dict):
+                    audio_url = output['audio'].get('url')
+                elif 'url' in output:
+                    audio_url = output['url']
+
+        if audio_url:
+            logger.info(f"[TTS] 合成成功: {audio_url[:80]}...")
+            return audio_url
+
+        logger.error(f"[TTS] 未能获取音频: content_type={content_type}, body_len={len(resp.content)}, resp={resp.text[:300]}")
+        return None
+
+    except Exception as e:
+        logger.error(f"[TTS] 合成异常: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+# ==================== VideoRetalk 后台任务 ====================
+
+def _poll_videoretalk_task(app, dh_id, task_id, user_id):
+    """轮询 VideoRetalk 任务状态，完成后下载视频并上传 OSS"""
+    max_wait = 600
+    poll_interval = 10
+    elapsed = 0
+
+    while elapsed < max_wait:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+        with app.app_context():
+            try:
+                dh = DigitalHuman.query.get(dh_id)
+                if not dh or dh.videoretalk_status not in ('processing', 'submitted'):
+                    return
+
+                result = videoretalk_tool.query_task(task_id)
+                status = result.get('status', '')
+
+                logger.info(f"[VideoRetalk] 轮询: task={task_id[:20]}..., status={status}, elapsed={elapsed}s")
+
+                if status == 'SUCCEEDED' and result.get('video_url'):
+                    video_url = result.get('video_url')
+                    video_duration = result.get('video_duration', 0)
+
+                    logger.info(f"[VideoRetalk] 任务完成，开始下载视频 {video_url[:80]}...")
+
+                    oss_url = _download_and_upload_video(video_url, dh_id, user_id)
+
+                    dh = DigitalHuman.query.get(dh_id)
+                    if dh:
+                        dh.videoretalk_status = 'completed'
+                        dh.generated_video_url = oss_url or video_url
+                        dh.generated_video_duration = video_duration
+                        db.session.commit()
+                        logger.info(f"[VideoRetalk] 视频生成完成: dh={dh_id}, url={dh.generated_video_url[:80]}...")
+                    return
+
+                elif status == 'FAILED':
+                    error_msg = result.get('error_message', result.get('error', '任务失败'))
+                    logger.error(f"[VideoRetalk] 任务失败: {error_msg}")
+                    dh = DigitalHuman.query.get(dh_id)
+                    if dh:
+                        dh.videoretalk_status = 'failed'
+                        db.session.commit()
+                    return
+
+            except Exception as e:
+                logger.error(f"[VideoRetalk] 轮询异常: {e}")
+
+    with app.app_context():
+        try:
+            dh = DigitalHuman.query.get(dh_id)
+            if dh and dh.videoretalk_status in ('processing', 'submitted'):
+                dh.videoretalk_status = 'timeout'
+                db.session.commit()
+                logger.warning(f"[VideoRetalk] 任务超时: dh={dh_id}")
+        except Exception:
+            pass
+
+
+def _download_and_upload_video(video_url: str, dh_id: str, user_id: str) -> str:
+    """下载 VideoRetalk 生成的视频并上传到OSS"""
+    try:
+        logger.info(f"[VideoRetalk] 下载视频: {video_url[:80]}...")
+        response = requests.get(video_url, timeout=300)
+        response.raise_for_status()
+        video_content = response.content
+
+        safe_id = re.sub(r'[^\w]', '_', dh_id)[:20]
+        output_filename = f"avatar_{safe_id}_{int(time.time())}.mp4"
+
+        local_temp_dir = os.path.join(os.path.dirname(__file__), '..', 'tmp')
+        os.makedirs(local_temp_dir, exist_ok=True)
+        local_temp_path = os.path.join(local_temp_dir, output_filename)
+
+        with open(local_temp_path, 'wb') as f:
+            f.write(video_content)
+
+        logger.info(f"[VideoRetalk] 视频下载完成，大小 {len(video_content)} bytes")
+
+        if oss_client.enabled:
+            try:
+                date_str = time.strftime('%Y/%m/%d')
+                oss_key = f"users/{user_id}/generated/{date_str}/{output_filename}"
+                oss_client.bucket.put_object(oss_key, video_content)
+
+                if oss_client.cdn_domain:
+                    oss_url = f"https://{oss_client.cdn_domain}/{oss_key}"
+                else:
+                    oss_url = f"https://{oss_client.bucket_name}.{oss_client.endpoint}/{oss_key}"
+
+                logger.info(f"[VideoRetalk] 视频上传OSS成功: {oss_url}")
+
+                try:
+                    os.remove(local_temp_path)
+                except Exception:
+                    pass
+
+                return oss_url
+            except Exception as e:
+                logger.error(f"[VideoRetalk] OSS上传失败: {e}")
+                import traceback
+                traceback.print_exc()
+
+        logger.info(f"[VideoRetalk] OSS未启用，使用本地文件: {local_temp_path}")
+        return video_url
+
+    except Exception as e:
+        logger.error(f"[VideoRetalk] 下载视频失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return video_url
+
+
+def _check_videoretalk_status(dh):
+    """检查VideoRetalk 任务状态（同步查询）"""
+    if not dh.videoretalk_task_id:
+        return
+    try:
+        result = videoretalk_tool.query_task(dh.videoretalk_task_id)
+        status = result.get('status', '')
+
+        if status == 'SUCCEEDED' and result.get('video_url'):
+            if not dh.generated_video_url:
+                dh.generated_video_url = result.get('video_url')
+                dh.generated_video_duration = result.get('video_duration', 0)
+            dh.videoretalk_status = 'completed'
+            db.session.commit()
+        elif status == 'FAILED':
+            dh.videoretalk_status = 'failed'
+            db.session.commit()
+        elif status in ('PENDING', 'PRE-PROCESSING', 'RUNNING', 'POST-PROCESSING'):
+            pass
+    except Exception as e:
+        logger.error(f"[VideoRetalk] 检查状态异常 {e}")
+
+
+# ==================== 声音克隆 (已有功能，保持不变) ====================
+
 @digital_human_bp.route('/users/<user_id>/voice-clones', methods=['GET'])
 def list_voice_clones(user_id):
     try:
@@ -143,15 +651,35 @@ def create_voice_clone():
         user_id = data.get('user_id')
         title = data.get('title', '').strip()
         audio_url = data.get('audio_url')
-        target_model = data.get('target_model', 'cosyvoice-v1')
+        target_model = data.get('target_model', 'cosyvoice-v2')
         ref_text = data.get('ref_text', CLONE_REF_TEXT)
+        system_voice_id = data.get('system_voice_id')
+        is_system_voice = data.get('is_system_voice', False)
 
-        logger.info(f"[VoiceClone] Create request: user={user_id}, title={title}, audio_url={audio_url}, target_model={target_model}")
+        logger.info(f"[VoiceClone] Create request: user={user_id}, title={title}, system_voice={system_voice_id}, is_system={is_system_voice}")
 
         if not user_id:
             return jsonify({'error': '缺少user_id'}), 400
         if not title:
             return jsonify({'error': '请输入声音名称'}), 400
+
+        if is_system_voice and system_voice_id:
+            vc = VoiceClone(
+                user_id=user_id,
+                title=title,
+                audio_url=audio_url or '',
+                model_type=target_model,
+                ref_text=ref_text or '',
+                clone_voice_id=system_voice_id,
+                clone_task_id=f"system_{system_voice_id}",
+                status='ready',
+            )
+            db.session.add(vc)
+            db.session.commit()
+
+            logger.info(f"[VoiceClone] System voice added: id={vc.id}, voice_id={system_voice_id}")
+            return jsonify(vc.to_dict()), 201
+
         if not audio_url:
             return jsonify({'error': '缺少音频URL'}), 400
 
@@ -217,72 +745,23 @@ def preview_voice_clone(vc_id):
 
         data = request.get_json(silent=True) or {}
         text = data.get('text', CLONE_REF_TEXT)
-        target_model = vc.model_type or 'cosyvoice-v1'
+        target_model = vc.model_type or 'cosyvoice-v2'
 
         logger.info(f"[VoiceClone] Preview: voice_id={vc.clone_voice_id}, model={target_model}, text={text[:30]}")
 
-        headers = {
-            'Authorization': f'Bearer {DASHSCOPE_API_KEY}',
-            'Content-Type': 'application/json',
-        }
-        payload = {
-            'model': target_model,
-            'input': {
-                'text': text,
-            },
-            'parameters': {
-                'voice': vc.clone_voice_id,
-                'format': 'mp3',
-                'sample_rate': 22050,
-            },
-        }
-
-        resp = requests.post(DASHSCOPE_TTS_URL, headers=headers, json=payload, timeout=60)
-        logger.info(f"[VoiceClone] TTS response status: {resp.status_code}")
-
-        if resp.status_code != 200:
-            error_text = resp.text[:500]
-            logger.error(f"[VoiceClone] TTS error: {error_text}")
-            return jsonify({'error': f'语音合成失败: {error_text}'}), 500
-
-        result = resp.json()
-        audio_url = None
-
-        if 'output' in result and 'audio' in result['output']:
-            audio_url = result['output']['audio'].get('url')
-        elif 'output' in result and 'results' in result['output']:
-            for r in result['output']['results']:
-                if 'url' in r:
-                    audio_url = r['url']
-                    break
-
-        if not audio_url:
-            task_id = result.get('output', {}).get('task_id')
-            if task_id:
-                for _ in range(30):
-                    time.sleep(2)
-                    task_resp = requests.get(
-                        f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}",
-                        headers={'Authorization': f'Bearer {DASHSCOPE_API_KEY}'},
-                        timeout=15
-                    )
-                    task_result = task_resp.json()
-                    task_status = task_result.get('output', {}).get('task_status', '')
-                    if task_status == 'SUCCEEDED':
-                        audio_url = task_result.get('output', {}).get('results', [{}])[0].get('url')
-                        break
-                    elif task_status == 'FAILED':
-                        return jsonify({'error': '语音合成失败'}), 500
+        audio_url = _synthesize_speech(text, vc.clone_voice_id, target_model)
 
         if audio_url:
             logger.info(f"[VoiceClone] Preview audio URL: {audio_url[:100]}")
             return jsonify({'audio_url': audio_url})
         else:
-            return jsonify({'error': '未能获取预览音频', 'raw_response': result}), 500
+            return jsonify({'error': '语音合成失败'}), 500
     except Exception as e:
         logger.error(f"[VoiceClone] Preview error: {e}")
         return jsonify({'error': str(e)}), 500
 
+
+# ==================== ICE Avatar 训练 (已有功能，保持不变) ====================
 
 def _start_avatar_training(dh_id, title, video_url, cover_url=None):
     app = current_app._get_current_object()
@@ -429,6 +908,8 @@ def _check_avatar_status(dh):
         logger.error(f"[Avatar] Check status error: {e}")
 
 
+# ==================== 声音克隆后台任务 (已有功能，保持不变) ====================
+
 def _start_voice_clone(vc_id, audio_url, prefix, target_model):
     app = current_app._get_current_object()
 
@@ -555,53 +1036,19 @@ def _poll_clone_status(app, vc_id, task_id, target_model):
 
 def _generate_preview_audio(app, vc_id, voice_id, target_model):
     try:
-        headers = {
-            'Authorization': f'Bearer {DASHSCOPE_API_KEY}',
-            'Content-Type': 'application/json',
-            'X-DashScope-Async': 'enable',
-        }
-        payload = {
-            'model': target_model,
-            'input': {
-                'text': CLONE_REF_TEXT,
-            },
-            'parameters': {
-                'voice': voice_id,
-                'format': 'mp3',
-                'sample_rate': 22050,
-            },
-        }
-
         logger.info(f"[VoiceClone] Generating preview audio: voice={voice_id}, model={target_model}")
 
-        resp = requests.post(DASHSCOPE_TTS_URL, headers=headers, json=payload, timeout=30)
-        result = resp.json()
-        logger.info(f"[VoiceClone] TTS response: {json.dumps(result, ensure_ascii=False)[:300]}")
+        with app.app_context():
+            audio_url = _synthesize_speech(CLONE_REF_TEXT, voice_id, target_model)
 
-        task_id = result.get('output', {}).get('task_id')
-        if task_id:
-            for _ in range(30):
-                time.sleep(2)
-                task_resp = requests.get(
-                    f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}",
-                    headers={'Authorization': f'Bearer {DASHSCOPE_API_KEY}'},
-                    timeout=15
-                )
-                task_result = task_resp.json()
-                task_status = task_result.get('output', {}).get('task_status', '')
-                if task_status == 'SUCCEEDED':
-                    audio_url = task_result.get('output', {}).get('results', [{}])[0].get('url')
-                    if audio_url:
-                        with app.app_context():
-                            vc = VoiceClone.query.get(vc_id)
-                            if vc:
-                                vc.preview_url = audio_url
-                                db.session.commit()
-                                logger.info(f"[VoiceClone] Preview audio saved: {audio_url[:100]}")
-                    return
-                elif task_status == 'FAILED':
-                    logger.error(f"[VoiceClone] Preview TTS failed: {task_result}")
-                    return
+            if audio_url:
+                vc = VoiceClone.query.get(vc_id)
+                if vc:
+                    vc.preview_url = audio_url
+                    db.session.commit()
+                    logger.info(f"[VoiceClone] Preview audio saved: {audio_url[:100]}")
+            else:
+                logger.error(f"[VoiceClone] Preview TTS failed for voice={voice_id}")
     except Exception as e:
         logger.error(f"[VoiceClone] Preview generation error: {e}")
 

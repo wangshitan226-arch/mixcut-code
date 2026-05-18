@@ -6,7 +6,7 @@ import {
   Volume2, CheckCircle2, Plus
 } from 'lucide-react';
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 interface HomeScreenProps {
   onNavigate: () => void;
@@ -40,6 +40,10 @@ interface DigitalHumanItem {
   voice_id?: string;
   voice_name?: string;
   status: string;
+  videoretalk_status?: string;
+  videoretalk_task_id?: string;
+  generated_video_url?: string;
+  generated_video_duration?: number;
   created_at: string;
   updated_at: string;
 }

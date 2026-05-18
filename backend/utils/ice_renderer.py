@@ -179,6 +179,148 @@ def generate_ice_timeline(
     return timeline
 
 
+# ==================== 数字人视频渲染 ====================
+
+def generate_digital_human_timeline(
+    avatar_video_url: str,
+    sentences: List[Dict],
+    template_config: Dict,
+    video_duration_ms: int = None
+) -> Dict:
+    """
+    生成数字人对口型视频的 ICE Timeline
+
+    与普通模板不同，数字人视频的渲染流程：
+    1. VideoRetalk 生成对口型视频（在路由层完成）
+    2. ICE 叠加字幕、花字、BGM、音效（本函数完成）
+
+    Args:
+        avatar_video_url: VideoRetalk 生成的对口型视频URL
+        sentences: 字幕数据列表
+        template_config: 模板配置（含 avatarConfig + subtitleStyles 等）
+        video_duration_ms: 视频时长（毫秒）
+
+    Returns:
+        ICE Timeline JSON
+    """
+    if not sentences:
+        raise ValueError("没有字幕数据")
+
+    subtitle_styles = template_config.get('subtitleStyles', SUBTITLE_STYLES)
+    avatar_config = template_config.get('avatarConfig', {})
+    video_effects = template_config.get('videoEffects', {})
+    bgm_config = template_config.get('backgroundMusic', {})
+    sound_effects = template_config.get('soundEffects', [])
+
+    total_duration_ms = video_duration_ms or sum(
+        s.get('end', 0) - s.get('start', 0) for s in sentences
+    )
+    total_duration_sec = total_duration_ms / 1000.0
+
+    if total_duration_sec <= 0:
+        last_end = max(s.get('end', 0) for s in sentences)
+        total_duration_sec = last_end / 1000.0
+
+    logger.info(f"[DigitalHuman] 生成Timeline: {len(sentences)}个字幕, 时长{total_duration_sec:.1f}s")
+
+    video_clips = generate_avatar_video_clips(
+        avatar_video_url, total_duration_sec, video_effects
+    )
+
+    subtitle_clips = generate_subtitle_clips(sentences, subtitle_styles)
+
+    audio_tracks = generate_avatar_audio_tracks(
+        bgm_config, sound_effects, total_duration_sec, sentences
+    )
+
+    timeline = {
+        "VideoTracks": [{"VideoTrackClips": video_clips}],
+        "SubtitleTracks": [{"SubtitleTrackClips": subtitle_clips}],
+        "AudioTracks": audio_tracks,
+        "VideoSummary": {
+            "Title": "数字人视频",
+            "Description": f"数字人对口型视频，包含 {len(subtitle_clips)} 个字幕",
+            "Duration": total_duration_sec,
+            "SubtitleCount": len(subtitle_clips),
+            "IsDigitalHuman": True
+        }
+    }
+
+    return timeline
+
+
+def generate_avatar_video_clips(
+    video_url: str,
+    duration: float,
+    effects_config: Dict = None
+) -> List[Dict]:
+    """生成数字人视频片段"""
+    effects = []
+    if effects_config and effects_config.get('enableSmartZoom'):
+        zoom_intensity = effects_config.get('zoomIntensity', 1.1)
+        effects.append({
+            "Type": "Video",
+            "SubType": "Zoom",
+            "Intensity": zoom_intensity
+        })
+
+    clip = {
+        "Type": "Video",
+        "MediaURL": video_url,
+        "In": 0.0,
+        "Out": duration,
+        "TimelineIn": 0.0,
+        "TimelineOut": duration
+    }
+
+    if effects:
+        clip["Effects"] = effects
+
+    return [clip]
+
+
+def generate_avatar_audio_tracks(
+    bgm_config: Dict,
+    sound_effects: List[Dict],
+    duration: float,
+    sentences: List[Dict]
+) -> List[Dict]:
+    """生成数字人视频的音频轨道"""
+    audio_tracks = []
+
+    if bgm_config and bgm_config.get('url'):
+        bgm_track = {
+            "AudioTrackClips": [{
+                "Type": "Audio",
+                "MediaURL": bgm_config['url'],
+                "In": 0.0,
+                "Out": duration,
+                "TimelineIn": 0.0,
+                "TimelineOut": duration,
+                "Volume": bgm_config.get('volume', 0.2),
+                "Effect": "FadeInFadeOut"
+            }]
+        }
+        audio_tracks.append(bgm_track)
+
+    if sound_effects:
+        sfx_clips = []
+        for sfx in sound_effects:
+            trigger = sfx.get('trigger', '')
+            trigger_time = find_trigger_time(sentences, trigger)
+            if trigger_time is not None:
+                sfx_clips.append({
+                    "Type": "Audio",
+                    "MediaURL": sfx['url'],
+                    "TimelineIn": trigger_time,
+                    "Volume": 0.7
+                })
+        if sfx_clips:
+            audio_tracks.append({"AudioTrackClips": sfx_clips})
+
+    return audio_tracks
+
+
 def calculate_actual_duration(sentences: List[Dict]) -> int:
     """计算保留片段的总时长（毫秒）"""
     if not sentences:

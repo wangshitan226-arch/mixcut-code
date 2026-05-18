@@ -5,7 +5,7 @@ import {
   ExternalLink, Send, Eye, EyeOff, Flame, X, Play, Edit3
 } from 'lucide-react';
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 interface Account {
   id: number;

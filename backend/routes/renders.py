@@ -149,34 +149,43 @@ def get_renders():
         if not renders:
             return jsonify({'combinations': []})
         
+        from models import DigitalHuman
         combinations = []
         for render in renders:
-            # 优先使用本地文件预览（速度快）
             file_exists = False
             video_url = None
             oss_uploading = False
             oss_uploaded = False
             
             if render.file_path and os.path.exists(render.file_path):
-                # 本地文件存在，用于预览
                 file_exists = True
                 video_url = f'/renders/{os.path.basename(render.file_path)}'
             elif render.oss_url:
-                # 本地不存在但有OSS URL
                 file_exists = True
                 video_url = render.oss_url
                 oss_uploaded = True
+            elif render.server_video_url:
+                file_exists = True
+                video_url = render.server_video_url
+                oss_uploaded = True
             
-            # 检查是否正在上传OSS
             if not render.oss_url and not oss_uploaded:
                 for task_id, task in render_tasks.items():
                     if task.get('combo_id') == render.id and task.get('status') == 'completed' and not task.get('oss_uploaded'):
                         oss_uploading = True
                         break
             
+            tag = render.tag or ''
+            if '数字人' in tag:
+                video_type = 'digital_human'
+            elif '口播' in tag or '智剪' in tag:
+                video_type = 'real_human_cut'
+            else:
+                video_type = 'mixcut'
+            
             try:
                 material_ids = json.loads(render.material_ids)
-            except:
+            except Exception:
                 material_ids = []
             
             materials_data = []
@@ -191,6 +200,17 @@ def get_renders():
                         'duration': material.duration,
                         'name': material.original_name
                     })
+                else:
+                    dh = DigitalHuman.query.get(mat_id)
+                    if dh:
+                        materials_data.append({
+                            'id': dh.id,
+                            'type': 'digital_human',
+                            'url': dh.video_url or '',
+                            'thumbnail': dh.cover_url or '',
+                            'duration': '',
+                            'name': dh.title
+                        })
             
             combo_data = {
                 'id': render.id,
@@ -201,17 +221,477 @@ def get_renders():
                 'duration_seconds': render.duration_seconds,
                 'tag': render.tag,
                 'preview_status': 'completed' if file_exists else 'pending',
-                'preview_url': video_url,  # 优先本地文件，流畅预览
-                'oss_url': render.oss_url,  # OSS URL（用于下载）
+                'preview_url': video_url,
+                'oss_url': render.oss_url,
                 'oss_uploading': oss_uploading,
-                'oss_uploaded': bool(render.oss_url)
+                'oss_uploaded': bool(render.oss_url),
+                'server_video_url': render.server_video_url,
+                'videoType': video_type,
             }
             combinations.append(combo_data)
         
         return jsonify({'combinations': combinations})
         
     except Exception as e:
+        logger.error(f"[Renders] 获取渲染列表失败: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@renders_bp.route('/renders/<render_id>', methods=['GET'])
+def get_render_by_id(render_id):
+    if render_id in render_tasks:
+        task = render_tasks[render_id]
+        response = {
+            'id': render_id,
+            'status': task['status'],
+            'progress': task.get('progress', 0),
+            'stage': task.get('stage', ''),
+            'type': task.get('type', ''),
+        }
+        if task['status'] == 'completed':
+            response['video_url'] = task.get('video_url')
+            response['oss_uploaded'] = task.get('oss_uploaded', False)
+            response['duration'] = task.get('duration')
+            combo_id = task.get('combo_id')
+            if combo_id:
+                render = Render.query.get(combo_id)
+                if render:
+                    response['combo_id'] = render.id
+                    response['tag'] = render.tag
+                    response['duration'] = render.duration
+                    response['duration_seconds'] = render.duration_seconds
+                    response['oss_url'] = render.oss_url
+                    response['thumbnail'] = render.thumbnail
+        elif task['status'] == 'failed':
+            response['error'] = task.get('error')
+        return jsonify(response)
+    
+    render = Render.query.get(render_id)
+    if not render:
+        return jsonify({'error': '渲染记录不存在'}), 404
+    
+    video_url = None
+    if render.file_path and os.path.exists(render.file_path):
+        video_url = f'/renders/{os.path.basename(render.file_path)}'
+    elif render.oss_url:
+        video_url = render.oss_url
+    elif render.server_video_url:
+        video_url = render.server_video_url
+    
+    tag = render.tag or ''
+    if '数字人' in tag:
+        video_type = 'digital_human'
+    elif '口播' in tag or '智剪' in tag:
+        video_type = 'real_human_cut'
+    else:
+        video_type = 'mixcut'
+    
+    try:
+        material_ids = json.loads(render.material_ids)
+    except Exception:
+        material_ids = []
+    
+    materials_data = []
+    from models import DigitalHuman
+    for mat_id in material_ids:
+        material = Material.query.get(mat_id)
+        if material and material.user_id == render.user_id:
+            materials_data.append({
+                'id': material.id,
+                'type': material.type,
+                'url': f'/uploads/{os.path.basename(material.file_path)}',
+                'thumbnail': f'/uploads/thumbnails/{os.path.basename(material.thumbnail_path)}',
+                'duration': material.duration,
+                'name': material.original_name
+            })
+        else:
+            dh = DigitalHuman.query.get(mat_id)
+            if dh:
+                materials_data.append({
+                    'id': dh.id,
+                    'type': 'digital_human',
+                    'url': dh.video_url or '',
+                    'thumbnail': dh.cover_url or '',
+                    'duration': '',
+                    'name': dh.title
+                })
+    
+    return jsonify({
+        'id': render.id,
+        'index': render.combo_index,
+        'materials': materials_data,
+        'thumbnail': render.thumbnail,
+        'duration': render.duration,
+        'duration_seconds': render.duration_seconds,
+        'tag': render.tag,
+        'preview_status': 'completed' if video_url else 'pending',
+        'preview_url': video_url,
+        'oss_url': render.oss_url,
+        'server_video_url': render.server_video_url,
+        'status': render.status,
+        'videoType': video_type,
+    })
+
+
+# ==================== 数字人视频渲染 ====================
+
+@renders_bp.route('/digital-human/render', methods=['POST'])
+def render_digital_human_video():
+    """
+    数字人视频渲染端点
+
+    两种模式:
+    - digital_human_pure: 纯口播，TTS + VideoRetalk，无字幕包装
+    - digital_human_mix: 口播混剪，TTS + VideoRetalk + ICE字幕/BGM/音效
+
+    请求体:
+    {
+        "user_id": "xxx",
+        "digital_human_id": "xxx",
+        "template_id": "xxx",
+        "text": "要合成的文本",
+        "voice_id": "可选",
+        "video_type": "digital_human_pure" | "digital_human_mix"
+    }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        user_id = data.get('user_id')
+        dh_id = data.get('digital_human_id')
+        template_id = data.get('template_id')
+        text = data.get('text', '').strip()
+        voice_id = data.get('voice_id')
+        video_type = data.get('video_type', 'digital_human_pure')
+        sentences = data.get('sentences', [])
+
+        if not user_id or not dh_id:
+            return jsonify({'error': '缺少user_id或digital_human_id'}), 400
+        if not text and not sentences:
+            return jsonify({'error': '请输入文本或提供字幕数据'}), 400
+
+        from models import DigitalHuman, Template
+        dh = DigitalHuman.query.get(dh_id)
+        if not dh:
+            return jsonify({'error': '数字人不存在'}), 404
+        if not dh.video_url:
+            return jsonify({'error': '数字人未设置模板视频'}), 400
+
+        effective_voice = voice_id or dh.voice_id
+        if not effective_voice:
+            return jsonify({'error': '未指定声音'}), 400
+
+        template_config = {}
+        if template_id:
+            template = Template.query.get(template_id)
+            if template:
+                try:
+                    template_config = json.loads(template.config) if isinstance(template.config, str) else template.config
+                except Exception:
+                    template_config = {}
+
+        render_type = template_config.get('renderType', 'pure' if video_type == 'digital_human_pure' else 'mix')
+
+        task_id = f"dh_render_{uuid.uuid4().hex[:8]}"
+        app = current_app._get_current_object()
+
+        render_tasks[task_id] = {
+            'id': task_id,
+            'status': 'processing',
+            'progress': 0,
+            'type': 'digital_human_render',
+            'video_type': video_type,
+            'render_type': render_type
+        }
+
+        def _render_pipeline():
+            with app.app_context():
+                try:
+                    from utils.videoretalk import videoretalk_tool
+
+                    render_tasks[task_id]['progress'] = 10
+                    render_tasks[task_id]['stage'] = 'synthesizing'
+
+                    from routes.digital_human import _synthesize_speech
+                    tts_model = 'cosyvoice-v2' if effective_voice.endswith('_v2') else 'cosyvoice-v1'
+                    audio_url = _synthesize_speech(text, effective_voice, tts_model)
+                    if not audio_url:
+                        render_tasks[task_id]['status'] = 'failed'
+                        render_tasks[task_id]['error'] = 'TTS语音合成失败'
+                        return
+
+                    render_tasks[task_id]['progress'] = 30
+                    render_tasks[task_id]['stage'] = 'videoretalk'
+
+                    avatar_config = template_config.get('avatarConfig', {})
+                    video_extension = avatar_config.get('video_extension', False)
+
+                    vr_result = videoretalk_tool.generate_avatar_video(
+                        video_url=dh.video_url,
+                        audio_url=audio_url,
+                        video_extension=video_extension,
+                        wait=True
+                    )
+
+                    if not vr_result.get('success'):
+                        render_tasks[task_id]['status'] = 'failed'
+                        render_tasks[task_id]['error'] = f"VideoRetalk失败: {vr_result.get('error', '未知错误')}"
+                        return
+
+                    avatar_video_url = vr_result.get('video_url')
+                    video_duration = vr_result.get('duration', 0)
+
+                    logger.info(f"[DH-Render] VideoRetalk完成: type={render_type}, duration={video_duration}s")
+
+                    if render_type == 'pure':
+                        render_tasks[task_id]['status'] = 'completed'
+                        render_tasks[task_id]['progress'] = 100
+                        render_tasks[task_id]['video_url'] = avatar_video_url
+                        render_tasks[task_id]['duration'] = video_duration
+
+                        dh_obj = DigitalHuman.query.get(dh_id)
+                        if dh_obj:
+                            dh_obj.generated_video_url = avatar_video_url
+                            dh_obj.generated_video_duration = video_duration
+                            dh_obj.videoretalk_status = 'completed'
+                            db.session.commit()
+
+                        try:
+                            from models import Render
+                            render_id = f"dh_{uuid.uuid4().hex[:12]}"
+                            combo_count = Render.query.filter_by(user_id=user_id).count()
+                            thumbnail = dh.cover_url
+                            if not thumbnail:
+                                thumbnail = _extract_thumbnail_from_video(avatar_video_url, user_id)
+                            render_record = Render(
+                                id=render_id,
+                                user_id=user_id,
+                                combo_index=combo_count,
+                                material_ids=json.dumps([dh_id]),
+                                tag='数字人视频',
+                                duration=f"{int(video_duration)//60:02d}:{int(video_duration)%60:02d}" if video_duration else "00:00",
+                                duration_seconds=video_duration or 0,
+                                thumbnail=thumbnail,
+                                oss_url=avatar_video_url,
+                                status='completed',
+                                server_video_url=avatar_video_url,
+                                server_video_status='completed',
+                            )
+                            db.session.add(render_record)
+                            db.session.commit()
+                            render_tasks[task_id]['combo_id'] = render_record.id
+                            logger.info(f"[DH-Render] 结果已保存到Render: {render_record.id}")
+                        except Exception as e:
+                            logger.error(f"[DH-Render] 保存Render记录失败: {e}")
+
+                        return
+
+                    render_tasks[task_id]['progress'] = 60
+                    render_tasks[task_id]['stage'] = 'compositing'
+
+                    from utils.ice_renderer import (
+                        generate_digital_human_timeline,
+                        submit_ice_job,
+                        ICE_SDK_AVAILABLE
+                    )
+
+                    if not sentences:
+                        est_duration_ms = int(video_duration * 1000) if video_duration else len(text) * 200
+                        sentences = [{
+                            'id': f's_{i}',
+                            'text': chunk,
+                            'start': i * 3000,
+                            'end': min((i + 1) * 3000, est_duration_ms)
+                        } for i, chunk in enumerate(_split_text(text, 20))]
+
+                    if ICE_SDK_AVAILABLE:
+                        try:
+                            timeline = generate_digital_human_timeline(
+                                avatar_video_url=avatar_video_url,
+                                sentences=sentences,
+                                template_config=template_config,
+                                video_duration_ms=int(video_duration * 1000) if video_duration else None
+                            )
+
+                            job_id, submit_media_id = submit_ice_job(
+                                timeline, user_id,
+                                output_filename=f"dh_{dh_id[:8]}_{int(time.time())}.mp4"
+                            )
+
+                            render_tasks[task_id]['progress'] = 80
+                            render_tasks[task_id]['stage'] = 'ice_rendering'
+                            render_tasks[task_id]['ice_job_id'] = job_id
+
+                            for _ in range(120):
+                                time.sleep(10)
+                                status = get_job_status(job_id)
+                                if status == 'Success':
+                                    from config import ICE_CONFIG
+                                    from alibabacloud_ice20201109.client import Client as ICEClient
+                                    from alibabacloud_tea_openapi import models as open_api_models
+
+                                    conf = open_api_models.Config(access_key_id=ICE_CONFIG['access_key_id'], access_key_secret=ICE_CONFIG['access_key_secret'])
+                                    conf.endpoint = f"ice.{ICE_CONFIG['region']}.aliyuncs.com"
+                                    ice_client = ICEClient(conf)
+
+                                    from alibabacloud_ice20201109 import models as ice_models
+                                    req = ice_models.GetMediaInfoRequest(media_id=submit_media_id)
+                                    media_info = ice_client.get_media_info(req)
+
+                                    final_url = None
+                                    if media_info.body and media_info.body.media_info:
+                                        final_url = media_info.body.media_info.media_url
+
+                                    render_tasks[task_id]['status'] = 'completed'
+                                    render_tasks[task_id]['progress'] = 100
+                                    render_tasks[task_id]['video_url'] = final_url or avatar_video_url
+
+                                    try:
+                                        from models import Render
+                                        render_id = f"dh_{uuid.uuid4().hex[:12]}"
+                                        combo_count = Render.query.filter_by(user_id=user_id).count()
+                                        thumbnail = dh.cover_url
+                                        if not thumbnail:
+                                            thumbnail = _extract_thumbnail_from_video(final_url or avatar_video_url, user_id)
+                                        render_record = Render(
+                                            id=render_id,
+                                            user_id=user_id,
+                                            combo_index=combo_count,
+                                            material_ids=json.dumps([dh_id]),
+                                            tag='数字人混剪',
+                                            duration=f"{int(video_duration)//60:02d}:{int(video_duration)%60:02d}" if video_duration else "00:00",
+                                            duration_seconds=video_duration or 0,
+                                            thumbnail=thumbnail,
+                                            oss_url=final_url or avatar_video_url,
+                                            status='completed',
+                                            server_video_url=final_url or avatar_video_url,
+                                            server_video_status='completed',
+                                        )
+                                        db.session.add(render_record)
+                                        db.session.commit()
+                                        render_tasks[task_id]['combo_id'] = render_record.id
+                                    except Exception as e:
+                                        logger.error(f"[DH-Render] 保存Render记录失败: {e}")
+
+                                    return
+                                elif status == 'Failed':
+                                    break
+
+                        except Exception as e:
+                            logger.error(f"[DH-Render] ICE渲染失败，使用原始视频: {e}")
+
+                    render_tasks[task_id]['status'] = 'completed'
+                    render_tasks[task_id]['progress'] = 100
+                    render_tasks[task_id]['video_url'] = avatar_video_url
+
+                    try:
+                        from models import Render
+                        render_id = f"dh_{uuid.uuid4().hex[:12]}"
+                        combo_count = Render.query.filter_by(user_id=user_id).count()
+                        thumbnail = dh.cover_url
+                        if not thumbnail:
+                            thumbnail = _extract_thumbnail_from_video(avatar_video_url, user_id)
+                        render_record = Render(
+                            id=render_id,
+                            user_id=user_id,
+                            combo_index=combo_count,
+                            material_ids=json.dumps([dh_id]),
+                            tag='数字人视频',
+                            duration=f"{int(video_duration)//60:02d}:{int(video_duration)%60:02d}" if video_duration else "00:00",
+                            duration_seconds=video_duration or 0,
+                            thumbnail=thumbnail,
+                            oss_url=avatar_video_url,
+                            status='completed',
+                            server_video_url=avatar_video_url,
+                            server_video_status='completed',
+                        )
+                        db.session.add(render_record)
+                        db.session.commit()
+                        render_tasks[task_id]['combo_id'] = render_record.id
+                    except Exception as e:
+                        logger.error(f"[DH-Render] 保存Render记录失败: {e}")
+
+                except Exception as e:
+                    logger.error(f"[DH-Render] 渲染管线异常: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    render_tasks[task_id]['status'] = 'failed'
+                    render_tasks[task_id]['error'] = str(e)
+
+        t = threading.Thread(target=_render_pipeline, daemon=True)
+        t.start()
+
+        return jsonify({
+            'success': True,
+            'task_id': task_id,
+            'status': 'processing',
+            'render_type': render_type,
+            'message': f'数字人{"纯口播" if render_type == "pure" else "混剪"}视频渲染已启动'
+        })
+
+    except Exception as e:
+        logger.error(f"[DH-Render] 请求异常: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+def _extract_thumbnail_from_video(video_url: str, user_id: str) -> str:
+    try:
+        tmp_dir = os.path.join(os.path.dirname(__file__), '..', 'tmp')
+        os.makedirs(tmp_dir, exist_ok=True)
+        thumb_path = os.path.join(tmp_dir, f"thumb_{uuid.uuid4().hex[:8]}.jpg")
+
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', video_url,
+            '-ss', '00:00:01',
+            '-vframes', '1',
+            '-q:v', '2',
+            '-vf', 'scale=300:400:force_original_aspect_ratio=decrease,pad=300:400:(ow-iw)/2:(oh-ih)/2',
+            thumb_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        if result.returncode != 0 or not os.path.exists(thumb_path):
+            logger.warning(f"[Thumbnail] ffmpeg提取缩略图失败: {result.stderr[:200]}")
+            return None
+
+        if oss_client.enabled:
+            oss_key = f"users/{user_id}/thumbnails/dh_{uuid.uuid4().hex[:8]}.jpg"
+            with open(thumb_path, 'rb') as f:
+                oss_client.bucket.put_object(oss_key, f.read())
+            if oss_client.cdn_domain:
+                thumb_url = f"https://{oss_client.cdn_domain}/{oss_key}"
+            else:
+                thumb_url = f"https://{oss_client.bucket_name}.{oss_client.endpoint}/{oss_key}"
+            try:
+                os.remove(thumb_path)
+            except Exception:
+                pass
+            logger.info(f"[Thumbnail] 缩略图上传OSS: {thumb_url}")
+            return thumb_url
+
+        thumb_url = f"/thumbnails/{os.path.basename(thumb_path)}"
+        return thumb_url
+
+    except Exception as e:
+        logger.error(f"[Thumbnail] 提取缩略图异常: {e}")
+        return None
+
+
+def _split_text(text: str, max_len: int = 20):
+    """将文本按标点或最大长度分割"""
+    import re
+    parts = re.split(r'([，。！？；：、\n,\.!\?;:])', text)
+    chunks = []
+    current = ''
+    for part in parts:
+        current += part
+        if len(current) >= max_len or part in '，。！？；：\n,.!?;:':
+            if current.strip():
+                chunks.append(current.strip())
+            current = ''
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks if chunks else [text]
 
 
 @renders_bp.route('/video/<combo_id>/preview', methods=['GET'])
@@ -380,12 +860,15 @@ def get_task_status(task_id):
     response = {
         'task_id': task_id,
         'status': task['status'],
-        'progress': task.get('progress', 0)
+        'progress': task.get('progress', 0),
+        'stage': task.get('stage', ''),
+        'type': task.get('type', ''),
     }
     
     if task['status'] == 'completed':
         response['video_url'] = task.get('video_url')
         response['oss_uploaded'] = task.get('oss_uploaded', False)
+        response['duration'] = task.get('duration')
     elif task['status'] == 'failed':
         response['error'] = task.get('error')
     

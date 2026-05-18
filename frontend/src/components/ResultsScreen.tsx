@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { ChevronLeft, CheckCircle2, Circle, Clock, Download, Play, Loader2, Pause, Square, Scissors, Cpu } from 'lucide-react';
+import { ChevronLeft, CheckCircle2, Circle, Clock, Download, Play, Loader2, Pause, Square, Scissors, Cpu, User } from 'lucide-react';
 import KaipaiEditor from './KaipaiEditor';
 import OptimizedVideoPlayer from './OptimizedVideoPlayer';
 import ProcessingModal from './ProcessingModal';
@@ -12,7 +12,7 @@ import { generateCombinations, convertServerMaterials, groupMaterialsByShot } fr
 import { loadMaterial } from '../utils/opfs';
 import { loadMaterialFromIndexedDB } from '../utils/indexedDB';
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 interface Material {
   id: string;
@@ -33,6 +33,9 @@ interface Combination {
   tag: string;
   preview_status?: 'pending' | 'processing' | 'completed' | 'failed';
   preview_url?: string;
+  server_video_url?: string;
+  oss_url?: string;
+  videoType?: 'mixcut' | 'digital_human' | 'real_human_cut';
 }
 
 interface ResultItem {
@@ -46,6 +49,7 @@ interface ResultItem {
   preview_status: 'pending' | 'processing' | 'completed' | 'failed';
   preview_url?: string;
   server_video_url?: string;
+  oss_url?: string;
   videoType?: 'mixcut' | 'digital_human' | 'real_human_cut';
 }
 
@@ -166,7 +170,9 @@ export default function ResultsScreen({
         materials: combo.materials,
         preview_status: combo.preview_status || 'pending',
         preview_url: combo.preview_url,
-        videoType: 'mixcut' as const,
+        server_video_url: combo.server_video_url,
+        oss_url: combo.oss_url,
+        videoType: combo.videoType || 'mixcut',
       }));
       setResults(items);
       setPreviewProgress({ completed: 0, total: items.length });
@@ -1565,11 +1571,17 @@ export default function ResultsScreen({
                     ) : (
                       // Thumbnail state
                       <div className="absolute inset-0 bg-black">
-                        <img 
-                          src={`${API_BASE_URL}${item.thumbnail}`} 
-                          alt="cover"
-                          className="w-full h-full object-cover"
-                        />
+                        {item.thumbnail ? (
+                          <img 
+                            src={item.thumbnail.startsWith('http') && !item.thumbnail.includes('localhost') && !item.thumbnail.includes('127.0.0.1') ? `${API_BASE_URL}/api/proxy/video?url=${encodeURIComponent(item.thumbnail)}` : item.thumbnail.startsWith('/') ? `${API_BASE_URL}${item.thumbnail}` : item.thumbnail} 
+                            alt="cover"
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-blue-900 to-purple-900 flex items-center justify-center">
+                            <User size={40} className="text-white/40" />
+                          </div>
+                        )}
                         
                         {/* Play Button - always show */}
                         <button

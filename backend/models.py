@@ -443,6 +443,11 @@ class DigitalHuman(db.Model):
 
     status = db.Column(db.String(20), default='draft')
 
+    videoretalk_task_id = db.Column(db.String(200), nullable=True)
+    videoretalk_status = db.Column(db.String(20), default='idle')
+    generated_video_url = db.Column(db.String(500), nullable=True)
+    generated_video_duration = db.Column(db.Float, default=0)
+
     created_at = db.Column(db.DateTime, default=db.func.now())
     updated_at = db.Column(db.DateTime, default=db.func.now(), onupdate=db.func.now())
 
@@ -459,6 +464,10 @@ class DigitalHuman(db.Model):
             'voice_id': self.voice_id,
             'voice_name': self.voice_name,
             'status': self.status,
+            'videoretalk_task_id': self.videoretalk_task_id,
+            'videoretalk_status': self.videoretalk_status,
+            'generated_video_url': self.generated_video_url,
+            'generated_video_duration': self.generated_video_duration,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }

@@ -194,6 +194,35 @@ def create_app():
         except Exception as e:
             print(f"[Migration] 迁移失败（可能字段已存在）: {e}")
     
+    # 迁移：为 digital_humans 添加 VideoRetalk 字段
+    try:
+        with app.app_context():
+            with db.engine.connect() as conn:
+                result = conn.execute(db.text("PRAGMA table_info(digital_humans)"))
+                columns = [row[1] for row in result]
+
+                if 'videoretalk_task_id' not in columns:
+                    conn.execute(db.text("ALTER TABLE digital_humans ADD COLUMN videoretalk_task_id VARCHAR(200)"))
+                    conn.commit()
+                    print("[Migration] 添加 videoretalk_task_id 字段")
+
+                if 'videoretalk_status' not in columns:
+                    conn.execute(db.text("ALTER TABLE digital_humans ADD COLUMN videoretalk_status VARCHAR(20) DEFAULT 'idle'"))
+                    conn.commit()
+                    print("[Migration] 添加 videoretalk_status 字段")
+
+                if 'generated_video_url' not in columns:
+                    conn.execute(db.text("ALTER TABLE digital_humans ADD COLUMN generated_video_url VARCHAR(500)"))
+                    conn.commit()
+                    print("[Migration] 添加 generated_video_url 字段")
+
+                if 'generated_video_duration' not in columns:
+                    conn.execute(db.text("ALTER TABLE digital_humans ADD COLUMN generated_video_duration FLOAT DEFAULT 0"))
+                    conn.commit()
+                    print("[Migration] 添加 generated_video_duration 字段")
+    except Exception as e:
+        print(f"[Migration] VideoRetalk迁移失败（可能字段已存在）: {e}")
+    
     return app
 
 

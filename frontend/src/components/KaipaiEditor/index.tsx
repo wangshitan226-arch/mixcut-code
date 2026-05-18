@@ -26,7 +26,7 @@ import SaveSuccessScreen from '../SaveSuccessScreen';
 import PublishCopyScreen from '../PublishCopyScreen';
 import LoadingOverlay from './LoadingOverlay';
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3002';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 // 模板类型定义
 interface Template {
